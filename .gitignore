@@ -1,0 +1,7 @@
+venvo/
+.env
+__pycache__/
+temp_uploads/
+validated_docs/
+*.pyc
+/.pytest_cache/
