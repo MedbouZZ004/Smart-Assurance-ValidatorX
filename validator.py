@@ -100,7 +100,6 @@ class InsuranceValidator:
     # LLM extraction + validation
     # -----------------------------
     def validate_with_groq(self, text: str, structure: dict, tech_report: dict) -> dict:
-
         """
         OBJECTIF :
         1) Classifier le document...

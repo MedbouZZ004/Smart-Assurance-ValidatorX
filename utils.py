@@ -323,6 +323,7 @@ def calculate_document_risk_score(
     }
 # in app.py or utils.py
 
+
 def advanced_name_match(name1: str, name2: str) -> float:
     n1 = normalize_name(name1).split()
     n2 = normalize_name(name2).split()

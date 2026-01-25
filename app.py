@@ -532,7 +532,6 @@ if st.button("Lancer l'audit IA (dossier)", type="primary"):
 
     st.caption(case_reason)
 
-
     st.divider()
     st.subheader("Résumé documents")
 
