@@ -139,3 +139,51 @@ class InsuranceValidator:
             raise ValueError("Clé API GROQ invalide.")
         except Exception as e:
             return {"is_valid": False, "score": 0, "reason": f"Erreur système : {str(e)}"}
+
+#added at 23:40 on 24/01/2026
+# Add this method inside your InsuranceValidator class
+def cross_validate_claim(self, data_bundle):
+    """
+    Compares 4 documents: Contract, Death Cert, ID, and RIB.
+    """
+    prompt = f"""
+    ROLE: Expert Insurance Auditor.
+
+    INSTRUCTIONS: Compare the following 4 documents to verify a death compensation claim.
+
+    DOCUMENTS PROVIDED:
+    1. CONTRACT: {data_bundle['contract']['text']}
+    2. DEATH CERTIFICATE: {data_bundle['death_cert']['text']}
+    3. BENEFICIARY ID: {data_bundle['id_card']['text']}
+    4. BANK RIB: {data_bundle['rib']['text']}
+
+    LOGICAL RULES TO VERIFY:
+    1. DECEASED MATCH: Does the 'Deceased' name on the Certificate match the 'Insured' name on the Contract?
+    2. BENEFICIARY MATCH: Does the 'Beneficiary' named in the Contract match the name on the ID?
+    3. PAYMENT MATCH: Does the name on the RIB (Bank) match the name on the Beneficiary ID?
+    4. TEMPORAL LOGIC:
+       - Is the 'Date of Death' between the 'Start Date' and 'End Date' of the Contract?
+       - $Contract\_Start \le Death\_Date \le Contract\_End$
+
+    OUTPUT FORMAT (JSON ONLY):
+    {{
+        "is_valid": bool,
+        "score": int,
+        "reason": "Detailed summary of findings",
+        "discrepancies": [
+            "e.g., Name on RIB (John D.) varies slightly from ID (Johnathan Doe)",
+            "e.g., Date of death is outside contract period"
+        ]
+    }}
+    """
+
+    try:
+        chat = self.client.chat.completions.create(
+            model="llama-3.3-70b-versatile",
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0,
+            response_format={"type": "json_object"}
+        )
+        return json.loads(chat.choices[0].message.content)
+    except Exception as e:
+        return {"is_valid": False, "score": 0, "reason": f"System Error: {str(e)}"}
