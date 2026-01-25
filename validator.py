@@ -85,10 +85,30 @@ class InsuranceValidator:
 
         return " ".join(text_results), structure, tech_report
 
+# Penalize score if technical tampering is suspected
+        final_score = int(analysis.get("score", 0))
+        if tech["potential_tampering"]:
+            final_score = max(0, final_score - 30)
+
+        return {
+            "category": analysis.get("category"),
+            "nom": analysis.get("nom"),
+            "score": final_score,
+            "tech_report": tech
+        }
     # -----------------------------
     # LLM extraction + validation
     # -----------------------------
     def validate_with_groq(self, text: str, structure: dict, tech_report: dict) -> dict:
+
+        """
+        OBJECTIF :
+        1) Classifier le document...
+        2) Extraire les noms complets SANS supprimer les particules (ex: garder 'El', 'Ait', 'Ben').
+           Si le texte dit 'Sara El Idrissi', n'écris pas 'Sara Idrissi'.
+        ...
+        """
+
         """
         LLM extracts fields + proposes ACCEPT/REVIEW.
         Post-validation enforces policy and Morocco checks.

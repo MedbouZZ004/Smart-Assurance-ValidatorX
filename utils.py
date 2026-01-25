@@ -20,22 +20,36 @@ from datetime import datetime
 def _strip_spaces(s: str) -> str:
     return re.sub(r"\s+", "", (s or ""))
 
+# In utils.py
+
 def normalize_name(s: str) -> str:
     """
-    Normalisation simple pour matching: minuscules, suppression accents courants, suppression espaces.
+    Standardizes names while preserving particles like El, Al, Ait, etc.
     """
-    s = (s or "").lower().strip()
+    if not s:
+        return ""
+
+    s = s.lower().strip()
+
+    # 1. Replace common accents
     replacements = {
-        "é": "e", "è": "e", "ê": "e",
-        "à": "a", "â": "a",
-        "ù": "u", "û": "u",
-        "ô": "o", "ö": "o",
-        "ç": "c", "î": "i", "ï": "i",
-        "’": "", "'": "",
-        " ": ""
+        "é": "e", "è": "e", "ê": "e", "à": "a", "â": "a",
+        "ù": "u", "û": "u", "ô": "o", "ö": "o", "ç": "c",
+        "î": "i", "ï": "i"
     }
     for old, new in replacements.items():
         s = s.replace(old, new)
+
+    # 2. Handle the "Err-" and dash cases (e.g., Err-achidia or names with dashes)
+    # We replace dashes with spaces so 'err-idrissi' becomes 'err idrissi'
+    s = s.replace("-", " ")
+
+    # 3. Remove punctuation but KEEP spaces
+    s = re.sub(r"[^a-z0-9\s]", "", s)
+
+    # 4. Collapse multiple spaces into one single space
+    s = re.sub(r"\s+", " ", s).strip()
+
     return s
 
 
@@ -76,31 +90,20 @@ def validate_iban(iban_str: str) -> tuple:
 
 
 def validate_rib_morocco(rib_str: str) -> tuple:
-    """
-    Validation "safe" d'un RIB Maroc (format affiché variable).
-    On ne fait pas un contrôle bancaire complet, mais on filtre les formats absurdes.
+    digits = re.sub(r"\D", "", rib_str)
+    if len(digits) != 24:
+        return False, "Un RIB marocain doit comporter 24 chiffres."
 
-    Approche:
-    - On extrait les chiffres uniquement
-    - On accepte un intervalle de longueur plausible (souvent 24 à 30+ selon affichage)
-    Retourne : (is_valid, message)
-    """
-    if not rib_str:
-        return False, "RIB vide"
-
-    raw = (rib_str or "").upper()
-    digits = re.sub(r"\D", "", raw)
-
-    # Trop court => invalide
-    if len(digits) < 20:
-        return False, "RIB trop court (format improbable)."
-
-    # Trop long => suspect
-    if len(digits) > 34:
-        return False, "RIB trop long (suspect)."
-
-    return True, "RIB format plausible."
-
+    # Checksum: (97 - (((97 + (bank_code_and_account % 97)) * 100) % 97))
+    # Or more simply: (RIB_22_digits * 100 + key) % 97 == 0
+    try:
+        base = int(digits[:22])
+        key = int(digits[22:])
+        if (base * 100 + key) % 97 == 0:
+            return True, "RIB valide"
+        return False, "Clé RIB incorrecte"
+    except ValueError:
+        return False, "Format numérique invalide"
 
 def validate_cin_morocco(cin_str: str) -> tuple:
     """
@@ -318,3 +321,20 @@ def calculate_document_risk_score(
         "breakdown": breakdown,
         "recommendation": rec
     }
+# in app.py or utils.py
+
+def advanced_name_match(name1: str, name2: str) -> float:
+    n1 = normalize_name(name1).split()
+    n2 = normalize_name(name2).split()
+
+    if not n1 or not n2:
+        return 0.0
+
+    # Intersection of words
+    set1, set2 = set(n1), set(n2)
+    intersection = set1.intersection(set2)
+
+    # If a particle like 'el' is in one but missing in the other,
+    # the intersection score will naturally drop.
+    score = len(intersection) / max(len(set1), len(set2))
+    return score
