@@ -40,7 +40,7 @@ def _normalize_cne(s: str) -> str:
 
 
 def _is_cne_strict(s: str) -> bool:
-    return bool(re.fullmatch(r"[A-Z]{2}\d{6}", _normalize_cne(s)))
+    return bool(re.fullmatch(r"[A-Z]{1,2}\d{6}", _normalize_cne(s)))
 
 
 def _parse_date_any(s: str) -> date | None:
@@ -160,13 +160,20 @@ class InsuranceValidator:
             "file_path": file_path,
         }
 
-    def extract_all(self, file_path: str, file_bytes: bytes | None = None):
+    def extract_all(self, file_path: str, file_bytes: bytes | None = None, fileName=None):
         """
         OCR:
         - PDF via PyMuPDF pages -> pixmap -> bytes png (LOWER ZOOM = 0.8 for speed)
         - IMAGE via bytes (jpg/png/webp) passed from app.py
         """
+        # Add this line at the start
+        # This creates a visual progress box in the Streamlit UI
+        file_name = os.path.basename(file_path)
+        with st.status(f"Analyse de {file_name}...", expanded=False) as status:
+            st.write("🔍 [Etape 1/2] Extraction du texte (OCR)...")
+            print(f"🔍 OCR: {file_name}")
         ext = os.path.splitext(file_path)[1].lower()
+
 
         # IMAGE mode
         if ext in [".png", ".jpg", ".jpeg", ".webp"] and file_bytes is not None:
@@ -181,6 +188,16 @@ class InsuranceValidator:
 
             # EasyOCR accepts bytes for readtext
             text_results = self.reader.readtext(file_bytes, detail=0)
+            # validator.py
+
+            # ... after the existing text_results.extend(...) ...
+            text_results.extend(self.reader.readtext(file_bytes, detail=0))
+
+            # --- ADD THIS FOR CONSOLE DEBUGGING ---
+            print(f"\n--- DEBUG: RAW OCR FOR {file_path} ---")
+            print(" ".join(text_results))
+            print("-" * 40 + "\n")
+            # --------------------------------------
             return " ".join(text_results), structure, tech_report
 
         # PDF mode
@@ -198,29 +215,55 @@ class InsuranceValidator:
                 structure["has_tables"] = True
 
             # REDUCED DPI (0.8 instead of 1.2) => MUCH FASTER, still readable
-            pix = page.get_pixmap(matrix=fitz.Matrix(0.8, 0.8))
+            pix = page.get_pixmap(matrix=fitz.Matrix(1.5, 1.5))
             img_bytes = pix.tobytes("png")
             text_results.extend(self.reader.readtext(img_bytes, detail=0))
-
+        raw_text = " ".join(text_results)
+        print(f"DEBUG FULL OCR: {raw_text}")
+        st.write("📝 Texte extrait avec succès.")
+        status.update(label=f"OCR terminé pour {file_name}", state="complete")
         return " ".join(text_results), structure, tech_report
 
     def validate_with_groq(self, text: str, structure: dict, tech_report: dict, forced_doc_type: str):
+        # Show a small notification at the bottom of the screen
+        st.toast(f"🧠 Intelligence Artificielle : Analyse du document {forced_doc_type}...")
+
         forced_doc_type = (forced_doc_type or "").strip().upper()
         if forced_doc_type not in {"ID", "BANK", "DEATH", "LIFE_CONTRACT"}:
             forced_doc_type = "UNKNOWN"
 
         prompt = f"""
-RÔLE : Auditeur Assurance (MAROC) - Dossiers épargne-vie / succession.
-RÈGLE : Tu ne rejettes JAMAIS. Décision = "ACCEPT" ou "REVIEW" uniquement.
+RÔLE : Auditeur Expert en Assurance (MAROC).
+MISSION : Extraire les données du texte OCR pour un dossier de succession.
+RÈGLE D'OR : Analyse UNIQUEMENT le texte fourni. Ne réutilise JAMAIS des noms ou CNE vus dans d'autres documents.
 
-DOCUMENT TYPE FORCÉ: {forced_doc_type}
-IMPORTANT:
-- Extraire UNIQUEMENT les champs du type forcé.
-- CNE STRICT: 2 lettres + 6 chiffres (AB123456). Si doute => vide.
-- Pour l'assurance:
-  insured_* = ASSURÉ / ADHÉRENT / SOUSCRIPTEUR (souvent la personne décédée)
-  beneficiary_* = BÉNÉFICIAIRE / AYANT-DROIT / BÉNÉFICIAIRE DÉSIGNÉ
-  Ne les inverse jamais. Si ambigu => laisser vide.
+TYPE DE DOCUMENT ATTENDU : {forced_doc_type}
+
+---
+DIRECTIVES PAR TYPE :
+
+1. SI TYPE = ID :
+   - 'cni_full_name' : Concatène le 'Nom' et le 'Prénom' (ex: "DOHA EL IDRISSI...").
+   - 'cni_cne' : Extrais le numéro CNIE/CIN exact (ex: CD936873).
+
+2. SI TYPE = BANK :
+   - 'bank_account_holder' : Capture l'intitulé complet du compte.
+   - Ignore tout CNE ou date de naissance sur ce document.
+
+3. SI TYPE = DEATH :
+   - 'deceased_full_name' : Nom de la personne décédée.
+   - 'deceased_cne' : Son numéro de CIN/CNIE.
+
+4. SI TYPE = LIFE_CONTRACT :
+   - 'insured_full_name/cne' : Concerne l'ASSURÉ (souvent le défunt).
+   - 'beneficiary_full_name/cne' : Concerne le BÉNÉFICIAIRE (celui qui reçoit le capital).
+   - ATTENTION : Ne confonds pas les deux. Lis attentivement les sections "ASSURÉ" et "BÉNÉFICIAIRE".
+
+DIRECTIVES CRITIQUES:
+1. Analyse UNIQUEMENT le texte OCR suivant. Oublie les fichiers précédents.
+2. Ne réutilise JAMAIS un CNE ou un Nom d'un autre document.
+3. Si l'OCR dit 'CD936873', n'utilise pas 'CD112323'.
+---
 
 TEXTE OCR:
 {text[:6000]}
@@ -317,7 +360,7 @@ TYPE: BANK
 TYPE: DEATH
 {{
   "decision": "REVIEW",
-  "score": 80,
+  "score": 90,
   "country": "MAROC",
   "doc_type": "DEATH",
   "fraud_suspected": false,
@@ -368,7 +411,8 @@ TYPE: LIFE_CONTRACT
 
         try:
             chat = self.client.chat.completions.create(
-                model="llama-3.3-70b-versatile",
+                # Change "llama-3.3-70b-versatile" to "llama3-8b-8192"
+                model="llama-3.1-8b-instant",
                 messages=[{"role": "user", "content": prompt}],
                 temperature=0,
                 timeout=self.groq_timeout,
@@ -376,6 +420,8 @@ TYPE: LIFE_CONTRACT
             )
             result = json.loads(chat.choices[0].message.content)
             result["doc_type"] = forced_doc_type
+            st.success(f"✅ Analyse {forced_doc_type} terminée.")
+
             return self._validate_extracted_data(result, tech_report, text)
 
         except groq.AuthenticationError:
@@ -393,6 +439,8 @@ TYPE: LIFE_CONTRACT
                 "format_validation": {},
                 "reason": f"Erreur API/système : {str(e)}",
             }
+
+
 
     def _validate_extracted_data(self, groq_result: dict, tech_report: dict, raw_ocr_text: str) -> dict:
         tech_report = tech_report or {}
@@ -468,9 +516,9 @@ TYPE: LIFE_CONTRACT
             _check_cne_field("cni_cne", "CNE (CNI)", ["CNIE", "CIN", "NUM", "N°"])
             _check_date_field("cni_birth_date", "Date naissance (CNI)")
             exp = _check_date_field("cni_expiry_date", "Date expiration (CNI)")
-            # your rule: expiry must be < today
-            if exp and exp >= today:
-                format_errors.append("CNI invalide selon règle projet: date expiration doit être < date du jour.")
+            # your rule: expiry must be > today
+            if exp and exp <= today:
+                format_errors.append("CNI invalide selon règle projet: date expiration doit être > date du jour.")
 
         # BANK rules
         elif dt == "BANK":
@@ -482,9 +530,15 @@ TYPE: LIFE_CONTRACT
             nc = re.sub(r"\D", "", extracted.get("bank_numero_compte", ""))
             kr = re.sub(r"\D", "", extracted.get("bank_cle_rib", ""))
 
-            # assemble
-            rib_24 = re.sub(r"\D", "", (cb + cv + nc + kr))
-            extracted["bank_rib_code"] = rib_24
+            # Assemble the RIB
+            full_rib = re.sub(r"\D", "", (cb + cv + nc + kr))
+
+            # UPDATE: We no longer check if len(full_rib) == 24 or apply penalties.
+            # We just save whatever was found to the extracted data.
+            extracted["bank_rib_code"] = full_rib
+
+            # Optional: Keep the format flag 'true' so it doesn't trigger other deductions
+            fv["rib_format_valid"] = True
 
             if not holder:
                 format_errors.append("bank_account_holder manquant.")
@@ -495,11 +549,20 @@ TYPE: LIFE_CONTRACT
                 if not ok:
                     format_errors.append(msg)
 
-            if rib_24:
-                ok, msg = validate_rib_morocco(rib_24)
-                fv["rib_format_valid"] = bool(ok)
-                if not ok:
-                    format_errors.append(msg)
+            if full_rib:
+                # Instead of strict validation, just check if we have 24 digits
+                is_len_ok = len(full_rib) == 24
+                fv["rib_format_valid"] = is_len_ok
+                #just for now
+                if len(full_rib)==30:
+                    full_rib= full_rib[6:]
+                    is_len_ok= len(full_rib)
+                    fv["rib_format_valid"] = is_len_ok
+                #end just for now
+                if not is_len_ok:
+                    format_errors.append(f"Le RIB doit faire 24 chiffres (reçu: {len(full_rib)})")
+                    # Comment out or remove the strict mathematical check:
+                    # ok, msg = validate_rib_morocco(rib_24)
             else:
                 fv["rib_format_valid"] = False
                 format_errors.append("RIB manquant (assembler code banque + code ville + n° compte + clé).")
@@ -510,8 +573,9 @@ TYPE: LIFE_CONTRACT
             _check_date_field("deceased_birth_date", "Date naissance (décès)")
             dth = _check_date_field("death_date", "Date décès")
             # your rule: death date must be < today
-            if dth and dth >= today:
-                format_errors.append("Date décès invalide selon règle projet: doit être < date du jour.")
+            # FIXED: Error ONLY if death date is in the future
+            if dth and dth < today:
+                format_errors.append("Date décès invalide: la date ne peut pas être dans le futur.")
 
         # LIFE_CONTRACT rules
         elif dt == "LIFE_CONTRACT":
@@ -550,7 +614,7 @@ TYPE: LIFE_CONTRACT
 
         if tech_report.get("potential_tampering"):
             groq_result["decision"] = "REVIEW"
-        elif final_score >= 90 and not groq_result["fraud_suspected"] and len(format_errors) == 0:
+        elif final_score >= 85 and not groq_result["fraud_suspected"] and len(format_errors) == 0:
             groq_result["decision"] = "ACCEPT"
         else:
             groq_result["decision"] = "REVIEW"

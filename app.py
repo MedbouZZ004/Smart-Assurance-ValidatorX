@@ -62,6 +62,14 @@ def init_audit_db():
 
 init_audit_db()
 
+def fuzzy_name_match(name1, name2):
+    if not name1 or not name2 or name1 == "—" or name2 == "—":
+        return False
+    # Clean, lowercase, split into words, and sort alphabetically
+    parts1 = sorted(re.sub(r'[^A-Z\s]', '', name1.upper()).split())
+    parts2 = sorted(re.sub(r'[^A-Z\s]', '', name2.upper()).split())
+    return parts1 == parts2
+
 def compute_file_hash(file_bytes: bytes) -> str:
     return hashlib.sha256(file_bytes).hexdigest()
 
@@ -328,6 +336,34 @@ for expected_type, uf in inputs:
 
 case_decision, case_reason, case_issues = compute_case_decision(doc_results)
 
+case_issues = []
+
+# Get names/CNEs from our main variables
+id_data = next((d for d in doc_results if d["expected_type"] == "ID"), None)
+bank_data = next((d for d in doc_results if d["expected_type"] == "BANK"), None)
+death_data = next((d for d in doc_results if d["expected_type"] == "DEATH"), None)
+life_data = next((d for d in doc_results if d["expected_type"] == "LIFE_CONTRACT"), None)
+
+# 1. CNI vs BANK (Fuzzy name match)
+if id_data and bank_data:
+    name_id = id_data["result"]["extracted_data"].get("cni_full_name")
+    name_bank = bank_data["result"]["extracted_data"].get("bank_account_holder")
+    if not fuzzy_name_match(name_id, name_bank):
+        case_issues.append(f"CNI vs BANK: Nom CNI ({name_id}) ≠ Titulaire RIB ({name_bank})")
+
+# 2. DEATH vs LIFE_CONTRACT (Match Insured to Deceased)
+if death_data and life_data:
+    cne_death = death_data["result"]["extracted_data"].get("deceased_cne")
+    cne_insured = life_data["result"]["extracted_data"].get("insured_cne")
+    if cne_death and cne_insured and cne_death != cne_insured:
+        case_issues.append(f"Décès vs Assurance: CNE décédé ({cne_death}) ≠ CNE assuré ({cne_insured})")
+
+# 3. CNI vs LIFE_CONTRACT (Match Beneficiary to CNI)
+if id_data and life_data:
+    cne_id = id_data["result"]["extracted_data"].get("cni_cne")
+    cne_benef = life_data["result"]["extracted_data"].get("beneficiary_cne")
+    if cne_id and cne_benef and cne_id != cne_benef:
+        case_issues.append(f"CNI vs Assurance: CNE bénéficiaire ({cne_benef}) ≠ CNE CNI ({cne_id})")
 dest_root = VALID_DIR if case_decision == "ACCEPT" else REVIEW_DIR
 case_dir = os.path.join(dest_root, case_id)
 os.makedirs(case_dir, exist_ok=True)
@@ -381,30 +417,68 @@ for d in doc_results:
     ex = r.get("extracted_data", {}) or {}
     holder, rib, iban = safe_get_bank_fields(ex)
 
+        # app.py
+
+    # ... inside your loop where you define 'ex' (extracted_data) ...
+
+    # 1. Initialize empty values for our target columns
+    cni_nom, cni_cne, cni_naiss, cni_exp = "—", "—", "—", "—"
+    deces_nom, deces_cne, deces_date = "—", "—", "—"
+
+    # 2. Apply Conditional Mapping based on expected_type
+    if d["expected_type"] == "ID":
+        cni_nom = ex.get("cni_full_name", "—")
+        cni_cne = ex.get("cni_cne", "—")
+        cni_naiss = ex.get("cni_birth_date", "—")
+        cni_exp = ex.get("cni_expiry_date", "—")
+
+    elif d["expected_type"] == "DEATH":
+        deces_nom = ex.get("deceased_full_name", "—")
+        deces_cne = ex.get("deceased_cne", "—")
+        deces_date = ex.get("death_date", "—")
+        cni_naiss = ex.get("deceased_birth_date", "—")
+
+    elif d["expected_type"] == "LIFE_CONTRACT":
+        # As requested: BÉNÉFICIAIRE goes to CNI cells
+        cni_nom = ex.get("beneficiary_full_name", "—")
+        cni_cne = ex.get("beneficiary_cne", "—")
+        cni_naiss = ex.get("beneficiary_birth_date", "—")
+
+        # As requested: ASSURÉ goes to DÉCÈS cells
+        deces_nom = ex.get("insured_full_name", "—")
+        deces_cne = ex.get("insured_cne", "—")
+        deces_date = ex.get("insured_birth_date", "—") # Using birth date since death date doesn't exist for insured here
+
+    # 3. Now append the row using these variables
     rows.append({
         "Doc attendu": d["expected_type"],
         "Fichier": d["file_name"],
         "Décision": r.get("decision", "REVIEW"),
         "Score": r.get("score", 0),
 
-        "CNI (nom)": ex.get("cni_full_name", "—"),
-        "CNI (CNE)": mask_value((ex.get("cni_cne", "—") or ""), keep_last=3),
-        "CNI (naiss.)": ex.get("cni_birth_date", "—"),
-        "CNI (exp.)": ex.get("cni_expiry_date", "—"),
+        # CNI Columns (Mapped based on logic above)
+        "CNI (nom)": cni_nom,
+        "CNI (CNE)": mask_value(cni_cne, keep_last=3) if cni_cne != "—" else "—",
+        "CNI (naiss.)": cni_naiss,
+        "CNI (exp.)": cni_exp,
 
+        # BANK Section
         "RIB (titulaire)": holder or "—",
         "RIB": mask_value(re.sub(r"\D", "", rib), keep_last=4) if rib != "N/A" else "—",
         "IBAN": mask_value(iban.replace(" ", ""), keep_last=4) if iban != "N/A" else "—",
 
-        "Décès (nom)": ex.get("deceased_full_name", "—"),
-        "Décès (CNE)": mask_value((ex.get("deceased_cne", "—") or ""), keep_last=3),
-        "Date décès": ex.get("death_date", "—"),
+        # DEATH Columns (Mapped based on logic above)
+        "Décès (nom)": deces_nom,
+        "Décès (CNE)": mask_value(deces_cne, keep_last=3) if deces_cne != "—" else "—",
+        "Date décès": deces_date,
 
+        # LIFE_CONTRACT Section (Keeping raw keys for clarity in those specific columns)
         "Assuré (nom)": ex.get("insured_full_name", "—"),
         "Assuré (CNE)": mask_value((ex.get("insured_cne", "—") or ""), keep_last=3),
         "Benef (nom)": ex.get("beneficiary_full_name", "—"),
         "Benef (CNE)": mask_value((ex.get("beneficiary_cne", "—") or ""), keep_last=3),
     })
+
 
 st.dataframe(rows, use_container_width=True)
 

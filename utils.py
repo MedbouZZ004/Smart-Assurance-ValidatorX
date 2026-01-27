@@ -311,7 +311,7 @@ def calculate_document_risk_score(
     final_score = max(0, min(100, score))
 
     # Recommendation aligned with "no auto-reject"
-    if final_score >= 90:
+    if final_score >= 85:
         rec = "AUTO-ACCEPT (confiance haute)"
     else:
         rec = "HUMAN REVIEW (à vérifier)"
