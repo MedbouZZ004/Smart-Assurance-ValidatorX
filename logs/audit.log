@@ -129,3 +129,14 @@
 2026-01-27 01:06:38,524 - WARNING - Neither CUDA nor MPS are available - defaulting to CPU. Note: This module is much faster with a GPU.
 2026-01-27 01:07:27,433 - INFO - HTTP Request: POST https://api.groq.com/openai/v1/chat/completions "HTTP/1.1 200 OK"
 2026-01-27 01:08:31,868 - INFO - HTTP Request: POST https://api.groq.com/openai/v1/chat/completions "HTTP/1.1 200 OK"
+2026-01-27 01:58:06,015 - INFO - Modules de sécurité initialisés
+2026-01-27 01:58:32,384 - INFO - Modules de sécurité initialisés
+2026-01-27 01:58:40,108 - INFO - Modules de sécurité initialisés
+2026-01-27 01:58:49,761 - INFO - Modules de sécurité initialisés
+2026-01-27 01:59:01,731 - INFO - Modules de sécurité initialisés
+2026-01-27 01:59:03,599 - INFO - Modules de sécurité initialisés
+2026-01-27 01:59:03,637 - WARNING - Using CPU. Note: This module is much faster with a GPU.
+2026-01-27 01:59:26,400 - INFO - HTTP Request: POST https://api.groq.com/openai/v1/chat/completions "HTTP/1.1 200 OK"
+2026-01-27 01:59:42,618 - INFO - HTTP Request: POST https://api.groq.com/openai/v1/chat/completions "HTTP/1.1 200 OK"
+2026-01-27 02:01:25,112 - INFO - HTTP Request: POST https://api.groq.com/openai/v1/chat/completions "HTTP/1.1 200 OK"
+2026-01-27 02:01:40,096 - INFO - HTTP Request: POST https://api.groq.com/openai/v1/chat/completions "HTTP/1.1 200 OK"
