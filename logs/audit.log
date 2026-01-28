@@ -1249,3 +1249,46 @@
 2026-01-28 03:20:14,956 - INFO - HTTP Request: POST https://api.groq.com/openai/v1/chat/completions "HTTP/1.1 429 Too Many Requests"
 2026-01-28 03:20:36,234 - INFO - HTTP Request: POST https://api.groq.com/openai/v1/chat/completions "HTTP/1.1 429 Too Many Requests"
 2026-01-28 03:20:41,985 - INFO - HTTP Request: POST https://api.groq.com/openai/v1/chat/completions "HTTP/1.1 429 Too Many Requests"
+2026-01-28 14:14:16,164 - INFO - Modules de sécurité initialisés
+2026-01-28 14:14:21,389 - INFO - Modules de sécurité initialisés
+2026-01-28 14:14:22,809 - INFO - Modules de sécurité initialisés
+2026-01-28 14:14:25,314 - INFO - Modules de sécurité initialisés
+2026-01-28 14:14:37,055 - INFO - Modules de sécurité initialisés
+2026-01-28 14:14:51,478 - INFO - Modules de sécurité initialisés
+2026-01-28 14:14:57,592 - INFO - Modules de sécurité initialisés
+2026-01-28 14:15:02,326 - INFO - Modules de sécurité initialisés
+2026-01-28 14:15:03,731 - INFO - Modules de sécurité initialisés
+2026-01-28 14:15:03,736 - WARNING - Using CPU. Note: This module is much faster with a GPU.
+2026-01-28 14:15:16,677 - INFO - Retrying request to /openai/v1/chat/completions in 0.376075 seconds
+2026-01-28 14:15:17,056 - INFO - Retrying request to /openai/v1/chat/completions in 0.917885 seconds
+2026-01-28 14:15:22,894 - INFO - Retrying request to /openai/v1/chat/completions in 0.375378 seconds
+2026-01-28 14:15:23,273 - INFO - Retrying request to /openai/v1/chat/completions in 0.753309 seconds
+2026-01-28 14:15:43,635 - INFO - Retrying request to /openai/v1/chat/completions in 0.438194 seconds
+2026-01-28 14:15:44,076 - INFO - Retrying request to /openai/v1/chat/completions in 0.918624 seconds
+2026-01-28 14:15:50,029 - INFO - Retrying request to /openai/v1/chat/completions in 0.481706 seconds
+2026-01-28 14:15:50,513 - INFO - Retrying request to /openai/v1/chat/completions in 0.798430 seconds
+2026-01-28 14:19:11,387 - INFO - Modules de sécurité initialisés
+2026-01-28 14:19:14,477 - INFO - Modules de sécurité initialisés
+2026-01-28 14:19:16,134 - INFO - Modules de sécurité initialisés
+2026-01-28 14:19:21,998 - INFO - Modules de sécurité initialisés
+2026-01-28 14:19:26,777 - INFO - Modules de sécurité initialisés
+2026-01-28 14:19:32,170 - INFO - Modules de sécurité initialisés
+2026-01-28 14:19:36,713 - INFO - Modules de sécurité initialisés
+2026-01-28 14:19:39,109 - INFO - Modules de sécurité initialisés
+2026-01-28 14:19:50,073 - INFO - HTTP Request: POST https://api.groq.com/openai/v1/chat/completions "HTTP/1.1 200 OK"
+2026-01-28 14:19:55,985 - INFO - HTTP Request: POST https://api.groq.com/openai/v1/chat/completions "HTTP/1.1 200 OK"
+2026-01-28 14:20:18,164 - INFO - HTTP Request: POST https://api.groq.com/openai/v1/chat/completions "HTTP/1.1 200 OK"
+2026-01-28 14:20:24,900 - INFO - HTTP Request: POST https://api.groq.com/openai/v1/chat/completions "HTTP/1.1 200 OK"
+2026-01-28 14:22:24,179 - INFO - Modules de sécurité initialisés
+2026-01-28 14:22:34,727 - INFO - HTTP Request: POST https://api.groq.com/openai/v1/chat/completions "HTTP/1.1 200 OK"
+2026-01-28 14:22:40,230 - INFO - HTTP Request: POST https://api.groq.com/openai/v1/chat/completions "HTTP/1.1 200 OK"
+2026-01-28 14:23:01,714 - INFO - HTTP Request: POST https://api.groq.com/openai/v1/chat/completions "HTTP/1.1 200 OK"
+2026-01-28 14:23:08,207 - INFO - HTTP Request: POST https://api.groq.com/openai/v1/chat/completions "HTTP/1.1 200 OK"
+2026-01-28 14:28:14,461 - INFO - Modules de sécurité initialisés
+2026-01-28 14:28:25,540 - INFO - Modules de sécurité initialisés
+2026-01-28 14:29:18,045 - INFO - Modules de sécurité initialisés
+2026-01-28 14:29:19,678 - INFO - Modules de sécurité initialisés
+2026-01-28 14:29:30,442 - INFO - HTTP Request: POST https://api.groq.com/openai/v1/chat/completions "HTTP/1.1 200 OK"
+2026-01-28 14:29:39,198 - INFO - HTTP Request: POST https://api.groq.com/openai/v1/chat/completions "HTTP/1.1 200 OK"
+2026-01-28 14:30:01,939 - INFO - HTTP Request: POST https://api.groq.com/openai/v1/chat/completions "HTTP/1.1 200 OK"
+2026-01-28 14:30:17,645 - INFO - HTTP Request: POST https://api.groq.com/openai/v1/chat/completions "HTTP/1.1 200 OK"

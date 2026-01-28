@@ -370,8 +370,8 @@ TYPE: BANK
 
 TYPE: DEATH
 {{
-  "decision": "REVIEW",
-  "score": 75,
+  "decision": "ACCEPT",
+  "score": 98,
   "country": "MAROC",
   "doc_type": "DEATH",
   "fraud_suspected": false,
@@ -380,7 +380,7 @@ TYPE: DEATH
     "deceased_full_name": "BENALI MOHAMED",
     "deceased_cne": "AB123456",
     "deceased_birth_date": "15/03/1985",
-    "death_date": "10/12/2027"
+    "death_date": "10/12/2025"
   }},
   "format_validation": {{
     "dates_format_valid": true,
@@ -388,7 +388,7 @@ TYPE: DEATH
     "iban_format_valid": true,
     "cne_format_valid": true
   }},
-  "reason": "Certificat décès bien rempli, date décès > aujourd'hui."
+  
 }}
 
 TYPE: LIFE_CONTRACT
