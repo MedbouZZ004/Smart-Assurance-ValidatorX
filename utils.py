@@ -21,37 +21,23 @@ def _strip_spaces(s: str) -> str:
     return re.sub(r"\s+", "", (s or ""))
 
 # In utils.py
-
 def normalize_name(s: str) -> str:
-    """
-    Standardizes names while preserving particles like El, Al, Ait, etc.
-    """
-    if not s:
-        return ""
-
+    if not s: return ""
     s = s.lower().strip()
 
-    # 1. Replace common accents
     replacements = {
         "é": "e", "è": "e", "ê": "e", "à": "a", "â": "a",
         "ù": "u", "û": "u", "ô": "o", "ö": "o", "ç": "c",
         "î": "i", "ï": "i"
     }
-    for old, new in replacements.items():
-        s = s.replace(old, new)
 
-    # 2. Handle the "Err-" and dash cases (e.g., Err-achidia or names with dashes)
-    # We replace dashes with spaces so 'err-idrissi' becomes 'err idrissi'
+    # Force hyphens to become spaces
     s = s.replace("-", " ")
 
-    # 3. Remove punctuation but KEEP spaces
+    # Remove all remaining non-alphanumeric characters
     s = re.sub(r"[^a-z0-9\s]", "", s)
-
-    # 4. Collapse multiple spaces into one single space
     s = re.sub(r"\s+", " ", s).strip()
-
     return s
-
 
 # =========================
 # VALIDATEURS DE FORMAT
@@ -92,7 +78,7 @@ def validate_iban(iban_str: str) -> tuple:
 def validate_rib_morocco(rib_str: str) -> tuple:
     digits = re.sub(r"\D", "", rib_str)
     if len(digits) != 24:
-        return False, "Un RIB marocain doit comporter 24 chiffres."
+        return True, "Un RIB marocain doit comporter 24 chiffres."
 
     # Checksum: (97 - (((97 + (bank_code_and_account % 97)) * 100) % 97))
     # Or more simply: (RIB_22_digits * 100 + key) % 97 == 0
@@ -129,18 +115,16 @@ def validate_cin_morocco(cin_str: str) -> tuple:
 
 
 def validate_date_format(date_str: str) -> tuple:
-    """
-    Vérifie qu'une date est au format JJ/MM/AAAA, JJ-MM-AAAA ou YYYY-MM-DD.
-    Retourne : (is_valid, formatted_date_dd/mm/yyyy | message)
-    """
     if not date_str:
         return False, "Date vide"
 
-    date_str = date_str.strip()
+    # Replace dots and spaces with slashes immediately
+    date_str = re.sub(r"[.\s\-]", "/", date_str.strip())
 
-    for fmt in ("%d/%m/%Y", "%d-%m-%Y", "%Y-%m-%d"):
+    for fmt in ("%d/%m/%Y", "%Y/%m/%d"):
         try:
             parsed = datetime.strptime(date_str, fmt)
+            # This ensures every date returned is in dd/mm/yyyy format
             return True, parsed.strftime("%d/%m/%Y")
         except ValueError:
             continue

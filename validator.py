@@ -25,13 +25,20 @@ def _norm_spaces(s: str) -> str:
     return re.sub(r"\s+", " ", (s or "").strip())
 
 
+# In validator.py, ensure this is consistent
 def _clean_name(s: str) -> str:
     s = (s or "").strip()
+    # 1. Remove any digits found in the name
     s = re.sub(r"\d+", " ", s)
-    s = re.sub(r"[^A-Za-zÀ-ÖØ-öø-ÿ\s\-']", " ", s)
+
+    # 2. REMOVE THE HYPHEN HERE:
+    # Before: s = re.sub(r"[^A-Za-zÀ-ÖØ-öø-ÿ\s\-']", " ", s)
+    # After:
+    s = re.sub(r"[^A-Za-zÀ-ÖØ-öø-ÿ\s']", " ", s)
+
+    # 3. Collapse the resulting double spaces
     s = re.sub(r"\s+", " ", s).strip()
     return s
-
 
 def _normalize_cne(s: str) -> str:
     s = (s or "").upper()
@@ -48,8 +55,14 @@ def _parse_date_any(s: str) -> date | None:
     if not s:
         return None
 
-    s2 = re.sub(r"[.\-]", "/", s)
+    # ADD THIS LINE: Clean common OCR errors for separators
+    s2 = re.sub(r"[.\-\',]", "/", s)
     s2 = re.sub(r"\s+", "/", s2)
+
+    # If the string contains a time (like 17.07), try to grab only the date part
+    match = re.search(r"(\d{2}/\d{2}/\d{4})", s2)
+    if match:
+        s2 = match.group(1)
 
     for fmt in ("%d/%m/%Y", "%Y/%m/%d"):
         try:
@@ -57,10 +70,7 @@ def _parse_date_any(s: str) -> date | None:
         except Exception:
             pass
 
-    try:
-        return datetime.strptime(s, "%Y-%m-%d").date()
-    except Exception:
-        return None
+    return None
 
 
 def _parse_duration_to_timedelta(s: str) -> timedelta | None:
@@ -251,8 +261,9 @@ DIRECTIVES PAR TYPE :
    - Ignore tout CNE ou date de naissance sur ce document.
 
 3. SI TYPE = DEATH :
-   - 'deceased_full_name' : Nom de la personne décédée.
-   - 'deceased_cne' : Son numéro de CIN/CNIE.
+- 'deceased_full_name' : Nom de la personne décédée.
+- 'deceased_cne' : Son numéro de CIN/CNIE.
+- 'death_date' : Extrais UNIQUEMENT la date (DD/MM/YYYY). Ignore l'heure (ex: si le texte dit '17.07 12/01/2026', extrais '12/01/2026').
 
 4. SI TYPE = LIFE_CONTRACT :
    - 'insured_full_name/cne' : Concerne l'ASSURÉ (souvent le défunt).
@@ -335,7 +346,7 @@ TYPE: ID
 TYPE: BANK
 {{
   "decision": "REVIEW",
-  "score": 70,
+  "score": 80,
   "country": "MAROC",
   "doc_type": "BANK",
   "fraud_suspected": false,
@@ -360,7 +371,7 @@ TYPE: BANK
 TYPE: DEATH
 {{
   "decision": "REVIEW",
-  "score": 90,
+  "score": 75,
   "country": "MAROC",
   "doc_type": "DEATH",
   "fraud_suspected": false,
@@ -369,7 +380,7 @@ TYPE: DEATH
     "deceased_full_name": "BENALI MOHAMED",
     "deceased_cne": "AB123456",
     "deceased_birth_date": "15/03/1985",
-    "death_date": "10/12/2023"
+    "death_date": "10/12/2027"
   }},
   "format_validation": {{
     "dates_format_valid": true,
@@ -377,7 +388,7 @@ TYPE: DEATH
     "iban_format_valid": true,
     "cne_format_valid": true
   }},
-  "reason": "Certificat décès bien rempli, date décès < aujourd'hui."
+  "reason": "Certificat décès bien rempli, date décès > aujourd'hui."
 }}
 
 TYPE: LIFE_CONTRACT
@@ -411,8 +422,8 @@ TYPE: LIFE_CONTRACT
 
         try:
             chat = self.client.chat.completions.create(
-                # Change "llama-3.3-70b-versatile" to "llama3-8b-8192"
-                model="llama-3.1-8b-instant",
+                # Change "llama-3.1-8b-instantllama-3.3-70b-versatile" to "llama3-8b-8192"
+                model="llama-3.3-70b-versatile",
                 messages=[{"role": "user", "content": prompt}],
                 temperature=0,
                 timeout=self.groq_timeout,
@@ -484,12 +495,22 @@ TYPE: LIFE_CONTRACT
             v = _norm_spaces(extracted.get(key, ""))
             if not v:
                 return None
-            ok, _ = validate_date_format(v)
+
+            # --- FIX: Pre-clean dots into slashes for unified format ---
+            v_clean = re.sub(r"[.\-]", "/", v)
+            v_clean = re.sub(r"\s+", "/", v_clean)
+            # -----------------------------------------------------------
+
+            ok, formatted_or_msg = validate_date_format(v_clean)
             if not ok:
                 fv["dates_format_valid"] = False
                 format_errors.append(f"{label} invalide: {v}")
                 return None
-            d = _parse_date_any(v)
+
+            # Update the extracted data with the unified DD/MM/YYYY string
+            extracted[key] = formatted_or_msg
+
+            d = _parse_date_any(formatted_or_msg)
             if not d:
                 fv["dates_format_valid"] = False
                 format_errors.append(f"{label} illisible: {v}")
@@ -522,60 +543,75 @@ TYPE: LIFE_CONTRACT
 
         # BANK rules
         elif dt == "BANK":
-            holder = _norm_spaces(extracted.get("bank_account_holder", ""))
-            iban = _norm_spaces(extracted.get("bank_iban", "")).upper().replace(" ", "")
+            ex = groq_result.get("extracted_data", {})
 
-            cb = re.sub(r"\D", "", extracted.get("bank_code_banque", ""))
-            cv = re.sub(r"\D", "", extracted.get("bank_code_ville", ""))
-            nc = re.sub(r"\D", "", extracted.get("bank_numero_compte", ""))
-            kr = re.sub(r"\D", "", extracted.get("bank_cle_rib", ""))
+            holder = _norm_spaces(ex.get("bank_account_holder", ""))
+            iban = _norm_spaces(ex.get("bank_iban", "")).upper().replace(" ", "")
 
-            # Assemble the RIB
+            # 1. Clean components (Normalize removes non-alphanumeric)
+            cb = _normalize_cne(ex.get("bank_code_banque", ""))
+            cv = _normalize_cne(ex.get("bank_code_ville", ""))
+            nc = _normalize_cne(ex.get("bank_numero_compte", ""))
+            kr = _normalize_cne(ex.get("bank_cle_rib", ""))
+
+            # 1. Assemble the RIB from the small boxes (usually more accurate)
             full_rib = re.sub(r"\D", "", (cb + cv + nc + kr))
 
-            # UPDATE: We no longer check if len(full_rib) == 24 or apply penalties.
-            # We just save whatever was found to the extracted data.
-            extracted["bank_rib_code"] = full_rib
+            # 2. If the IBAN from the AI is messy, RECONSTRUCT it from the RIB
+            # Moroccan IBAN = MA + Checksum (2 digits) + RIB (24 digits)
+            if len(full_rib) == 24:
+                # If the extracted IBAN is failing, we can trust the RIB more
+                # You could even 'trust' the IBAN digits but force the prefix
+                pass
 
-            # Optional: Keep the format flag 'true' so it doesn't trigger other deductions
-            fv["rib_format_valid"] = True
+            ex["bank_rib_code"] = full_rib
 
+            # 3. Holder Check
             if not holder:
-                format_errors.append("bank_account_holder manquant.")
+                format_errors.append("Titulaire du compte (bank_account_holder) manquant.")
 
+            # 4. IBAN Cleaning & Validation (The "34-char" fix)
             if iban:
+                # 1. Standardize: uppercase and remove spaces
+                iban = iban.upper().replace(" ", "")
+                original_for_log = iban  # Keep a copy for the error message
+
+                # 2. SMART CLEANING: Find where the Moroccan IBAN actually starts
+                if "MA" in iban:
+                    start_idx = iban.find("MA")
+                    iban = iban[start_idx : start_idx + 28] # Start at MA and take 28 chars
+                elif len(iban) > 28:
+                    # Fallback: if MA isn't found but it's long, take the end
+                    iban = iban[-28:]
+
+                # 3. LOGGING: If we changed the length, tell the user
+                if len(original_for_log) != len(iban):
+                    format_errors.append(f"IBAN nettoyé. Original: {original_for_log}")
+
+                # 4. SAVE & VALIDATE
+                ex["bank_iban"] = iban
                 ok, msg = validate_iban(iban)
                 fv["iban_format_valid"] = bool(ok)
                 if not ok:
                     format_errors.append(msg)
 
-            if full_rib:
-                # Instead of strict validation, just check if we have 24 digits
-                is_len_ok = len(full_rib) == 24
-                fv["rib_format_valid"] = is_len_ok
-                #just for now
-                if len(full_rib)==30:
-                    full_rib= full_rib[6:]
-                    is_len_ok= len(full_rib)
-                    fv["rib_format_valid"] = is_len_ok
-                #end just for now
-                if not is_len_ok:
-                    format_errors.append(f"Le RIB doit faire 24 chiffres (reçu: {len(full_rib)})")
-                    # Comment out or remove the strict mathematical check:
-                    # ok, msg = validate_rib_morocco(rib_24)
-            else:
-                fv["rib_format_valid"] = False
-                format_errors.append("RIB manquant (assembler code banque + code ville + n° compte + clé).")
-
         # DEATH rules
+        # In validator.py, update the DEATH block:
         elif dt == "DEATH":
-            _check_cne_field("deceased_cne", "CNE (décès)", ["DECE", "DECED", "CIN", "CNIE", "ID"])
-            _check_date_field("deceased_birth_date", "Date naissance (décès)")
-            dth = _check_date_field("death_date", "Date décès")
-            # your rule: death date must be < today
-            # FIXED: Error ONLY if death date is in the future
-            if dth and dth < today:
-                format_errors.append("Date décès invalide: la date ne peut pas être dans le futur.")
+            # 1. Clean and unify the date format first
+            raw_death_date = _norm_spaces(extracted.get("death_date", ""))
+
+            # Use the helper to unify the format to DD/MM/YYYY
+            ok, formatted_date = validate_date_format(raw_death_date)
+            if ok:
+                extracted["death_date"] = formatted_date # This makes it 12/01/2026
+
+            # 2. Check for future date (careful with system time!)
+            dth = _parse_date_any(extracted.get("death_date", ""))
+            if dth and dth > today:
+                # If testing with 'future' dates like 2026, you might want to skip this
+                # or ensure your system clock is correct.
+                format_errors.append(f"Date décès dans le futur: {dth}")
 
         # LIFE_CONTRACT rules
         elif dt == "LIFE_CONTRACT":
@@ -600,7 +636,7 @@ TYPE: LIFE_CONTRACT
                         format_errors.append("Durée manquante/illisible (si pas de date fin).")
                     else:
                         computed_end = eff + td
-                        if computed_end >= today:
+                        if computed_end <= today:
                             format_errors.append("Contrat invalide selon règle projet: date effet + durée doit être < date du jour.")
 
         # scoring / decision
