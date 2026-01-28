@@ -474,11 +474,6 @@ TYPE: LIFE_CONTRACT
         fv.setdefault("rib_format_valid", True)
         fv.setdefault("dates_format_valid", True)
 
-        if tech_report.get("potential_tampering"):
-            fraud_signals.append(f"Suspicious editor: {tech_report.get('editor_detected')}")
-        if tech_report.get("font_count", 0) > 8:
-            fraud_signals.append(f"High font variety: {tech_report.get('font_count')} fonts")
-
         today = date.today()
 
         def _check_date_field(key: str, label: str) -> date | None:
@@ -616,7 +611,7 @@ TYPE: LIFE_CONTRACT
             dth = _check_date_field("death_date", "Date décès")
             # your rule: death date must be < today
             # FIXED: Error ONLY if death date is in the future
-            if dth and dth < today:
+            if dth and dth > today:
                 format_errors.append("Date décès invalide: la date ne peut pas être dans le futur.")
 
         # LIFE_CONTRACT rules
@@ -644,6 +639,24 @@ TYPE: LIFE_CONTRACT
                         computed_end = eff + td
                         if computed_end <= today:
                             format_errors.append("Contrat invalide selon règle projet: date effet + durée doit être < date du jour.")
+
+        # -------------------------------
+        # BUSINESS OVERRIDE (BANK CLEAN)
+        # -------------------------------
+        fv = groq_result.get("format_validation", {})
+
+        is_clean_bank = (
+            fv.get("rib_format_valid") is True and
+            fv.get("iban_format_valid") is True and
+            not tech_report.get("potential_tampering", False) and
+            not tech_report.get("suspicious_metadata", False)
+        )
+
+        if dt == "BANK" and is_clean_bank:
+            groq_result["score"] = max(groq_result.get("score", 0), 90)
+            groq_result["decision"] = "ACCEPT"
+            groq_result["fraud_suspected"] = False
+
 
         # scoring / decision
         base_score = int(groq_result.get("score", 60) or 60)

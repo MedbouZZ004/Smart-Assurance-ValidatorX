@@ -65,10 +65,15 @@ init_audit_db()
 def fuzzy_name_match(name1, name2):
     if not name1 or not name2 or name1 == "—" or name2 == "—":
         return False
-    # Clean, lowercase, split into words, and sort alphabetically
-    parts1 = sorted(re.sub(r'[^A-Z\s]', '', name1.upper()).split())
-    parts2 = sorted(re.sub(r'[^A-Z\s]', '', name2.upper()).split())
-    return parts1 == parts2
+
+    def norm(n: str) -> list[str]:
+        n = (n or "").upper().replace("-", " ")  # <-- IMPORTANT
+        n = re.sub(r"[^A-Z\s]", " ", n)          # <-- pas "" (sinon ça colle)
+        n = re.sub(r"\s+", " ", n).strip()
+        return sorted(n.split())
+
+    return norm(name1) == norm(name2)
+
 
 def compute_file_hash(file_bytes: bytes) -> str:
     return hashlib.sha256(file_bytes).hexdigest()
@@ -95,10 +100,15 @@ def save_to_audit_db(case_id, expected_type, file_name, file_hash, score, decisi
 # -----------------------------
 def normalize_simple(s: str) -> str:
     s = (s or "").lower()
+
+    # IMPORTANT: casser les tirets en espaces (CNI met des tirets)
+    s = s.replace("-", " ")
+
     s = re.sub(r"\d+", " ", s)
-    s = re.sub(r"[^a-zàâçéèêëîïôùûüÿñ\s\-']", " ", s)
+    s = re.sub(r"[^a-zàâçéèêëîïôùûüÿñ\s']", " ", s)  # <-- retire le \- ici
     s = re.sub(r"\s+", " ", s).strip()
     return s
+
 
 def name_overlap(a: str, b: str) -> float:
     a, b = normalize_simple(a), normalize_simple(b)
