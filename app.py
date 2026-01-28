@@ -223,39 +223,214 @@ def compute_case_decision(doc_results):
 
 # -----------------------------
 # UI
+# Custom CSS for better styling
 # -----------------------------
-st.set_page_config(page_title="Insurance Validator", layout="wide")
-st.title("Insurance Document Validator — Forced 4-doc flow")
+st.set_page_config(page_title="Insurance Validator", layout="wide", initial_sidebar_state="expanded")
 
-st.sidebar.title("Maintenance")
-if st.sidebar.button("🧹 Vider cache résultats (DB + fingerprints + dossiers)"):
-    # nuke db + fingerprints + folders
-    for f in ["audit_trail.db", "fingerprints.json"]:
-        if os.path.exists(f):
-            os.remove(f)
+# Custom CSS styling
+custom_css = """
+<style>
+    /* Main styling */
+    .main {
+        background: linear-gradient(135deg, #0f1419 0%, #1a1f2e 100%);
+    }
+    
+    /* Header styling */
+    h1, h2, h3 {
+        color: #e0e8f0;
+        font-weight: 700;
+        letter-spacing: -0.5px;
+    }
+    
+    h1 {
+        font-size: 2.5rem !important;
+        margin-bottom: 0.5rem !important;
+    }
+    
+    /* Divider enhancement */
+    hr {
+        margin: 2rem 0 !important;
+        border: none;
+        height: 2px;
+        background: linear-gradient(90deg, #667eea 0%, transparent 50%, #667eea 100%);
+    }
+    
+    /* Button styling */
+    .stButton > button {
+        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+        color: white !important;
+        border: none;
+        border-radius: 8px;
+        padding: 0.75rem 2rem !important;
+        font-weight: 600;
+        transition: all 0.3s ease;
+        box-shadow: 0 4px 15px rgba(102, 126, 234, 0.4);
+    }
+    
+    .stButton > button:hover {
+        transform: translateY(-2px);
+        box-shadow: 0 6px 20px rgba(102, 126, 234, 0.6);
+    }
+    
+    /* File uploader styling */
+    .stFileUploader {
+        background: linear-gradient(135deg, rgba(102, 126, 234, 0.15) 0%, rgba(118, 75, 162, 0.15) 100%);
+        border: 2px solid rgba(102, 126, 234, 0.3);
+        border-radius: 12px;
+        padding: 1.5rem;
+        box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
+        margin-bottom: 1rem;
+    }
+    
+    /* Success/Warning/Error messages */
+    .stAlert {
+        border-radius: 10px;
+        border-left: 4px solid;
+        padding: 1rem;
+        margin: 1rem 0;
+        background: rgba(255, 255, 255, 0.05) !important;
+    }
+    
+    /* Dataframe styling */
+    .stDataFrame {
+        border-radius: 10px;
+        overflow: hidden;
+        box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
+        background: rgba(30, 41, 59, 0.8) !important;
+    }
+    
+    /* Expander styling */
+    .streamlit-expanderHeader {
+        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+        border-radius: 8px;
+        color: white !important;
+    }
+    
+    /* Metric styling */
+    .stMetric {
+        background: linear-gradient(135deg, rgba(102, 126, 234, 0.2) 0%, rgba(118, 75, 162, 0.2) 100%);
+        border: 1px solid rgba(102, 126, 234, 0.3);
+        border-radius: 10px;
+        padding: 1rem;
+        box-shadow: 0 2px 8px rgba(0, 0, 0, 0.5);
+    }
+</style>
+"""
+st.markdown(custom_css, unsafe_allow_html=True)
 
-    for d in [VALID_DIR, REVIEW_DIR, TMP_DIR]:
-        if os.path.exists(d):
-            shutil.rmtree(d, ignore_errors=True)
-            os.makedirs(d, exist_ok=True)
+# Main title with description
+col1, col2 = st.columns([3, 1])
+with col1:
+    st.title("🏢 Insurance Document Validator")
+    st.markdown("**Smart succession document analysis system** • Automated verification & fraud detection")
 
-    st.sidebar.success("Cache vidé. Relance la page.")
+# Sidebar
+st.sidebar.title("⚙️ Settings & Maintenance")
+
+# Check if we're in cache clear mode
+if "clear_cache_mode" not in st.session_state:
+    st.session_state.clear_cache_mode = False
+
+if st.sidebar.button("🧹 Clear Cache", use_container_width=True):
+    st.session_state.clear_cache_mode = True
+
+# Display cache clear confirmation page
+if st.session_state.clear_cache_mode:
+    st.divider()
+    st.subheader("🗑️ Clear Cache & Reset System")
+    
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        st.warning("⚠️ This will delete all cached results, databases, and temporary files.")
+        st.write("**Affected items:**")
+        st.markdown("""
+        - Audit database (audit_trail.db)
+        - Fingerprint cache (fingerprints.json)
+        - Temporary uploads folder
+        - Validated documents folder
+        - Review needed folder
+        """)
+    
+    with col2:
+        st.info("This action cannot be undone. Make sure you have backed up any important data.")
+    
+    st.divider()
+    
+    col_btn1, col_btn2, col_btn3 = st.columns([2, 2, 1])
+    
+    with col_btn1:
+        if st.button("✅ Confirm Clear", use_container_width=True, key="confirm_clear"):
+            # nuke db + fingerprints + folders
+            for f in ["audit_trail.db", "fingerprints.json"]:
+                if os.path.exists(f):
+                    os.remove(f)
+
+            for d in [VALID_DIR, REVIEW_DIR, TMP_DIR]:
+                if os.path.exists(d):
+                    shutil.rmtree(d, ignore_errors=True)
+                    os.makedirs(d, exist_ok=True)
+
+            st.success("✅ Cache cleared successfully! System reset complete.")
+            st.session_state.clear_cache_mode = False
+            st.balloons()
+            st.stop()
+    
+    with col_btn2:
+        if st.button("❌ Cancel", use_container_width=True, key="cancel_clear"):
+            st.session_state.clear_cache_mode = False
+            st.rerun()
+    
     st.stop()
 
-show_ocr_debug = st.checkbox("Afficher OCR brut (debug)", value=False)
+show_ocr_debug = st.checkbox("🔍 Show OCR Debug (technical details)", value=False)
 
-st.subheader("1) Upload (PDF / Image) — 4 documents")
+# Upload Section
+st.divider()
+st.subheader("📤 Step 1: Upload Required Documents")
+st.markdown("Please upload **all 4 documents** in the appropriate categories below. Accepted formats: PDF, PNG, JPG, JPEG, WebP")
+
 types = ["pdf", "png", "jpg", "jpeg", "webp"]
 
-cni_file = st.file_uploader("1) CNI / CNIE", type=types, accept_multiple_files=False)
-rib_file = st.file_uploader("2) RIB / IBAN", type=types, accept_multiple_files=False)
-death_file = st.file_uploader("3) Certificat de décès", type=types, accept_multiple_files=False)
-life_file = st.file_uploader("4) Assurance épargne-vie", type=types, accept_multiple_files=False)
+# Create a better layout for file uploads
+col1, col2 = st.columns(2)
+
+with col1:
+    st.markdown("#### 📋 Identity Documents")
+    cni_file = st.file_uploader("📌 1. National ID (CNI/CNIE)", type=types, accept_multiple_files=False, key="cni")
+    if cni_file:
+        st.caption(f"✅ {cni_file.name} ({cni_file.size} bytes)")
+    
+    st.markdown("#### 💼 Insurance Documents")
+    life_file = st.file_uploader("📌 4. Life Savings Policy (épargne-vie)", type=types, accept_multiple_files=False, key="life")
+    if life_file:
+        st.caption(f"✅ {life_file.name} ({life_file.size} bytes)")
+
+with col2:
+    st.markdown("#### 📄 Administrative Documents")
+    death_file = st.file_uploader("📌 3. Death Certificate", type=types, accept_multiple_files=False, key="death")
+    if death_file:
+        st.caption(f"✅ {death_file.name} ({death_file.size} bytes)")
+    
+    st.markdown("#### 🏦 Banking Documents")
+    rib_file = st.file_uploader("📌 2. Bank Account Details (RIB/IBAN)", type=types, accept_multiple_files=False, key="rib")
+    if rib_file:
+        st.caption(f"✅ {rib_file.name} ({rib_file.size} bytes)")
 
 if not (cni_file and rib_file and death_file and life_file):
+    st.info("⏳ Waiting for all 4 documents to be uploaded...")
     st.stop()
 
-if not st.button("🚀 Démarrer l’analyse du dossier"):
+# Progress indicator
+progress_placeholder = st.empty()
+st.divider()
+
+col_center = st.columns([1, 2, 1])[1]
+with col_center:
+    if st.button("🚀 Start Analysis", use_container_width=True, key="start_analysis"):
+        st.session_state.analysis_started = True
+
+if "analysis_started" not in st.session_state or not st.session_state.analysis_started:
     st.stop()
 
 inputs = [
@@ -274,7 +449,13 @@ case_id = hashlib.sha256(
 temp_dir = os.path.join(TMP_DIR, case_id)
 os.makedirs(temp_dir, exist_ok=True)
 
-st.subheader("2) Traitement")
+# Processing section with progress
+st.subheader("⚙️ Step 2: Processing Documents")
+st.caption(f"Case ID: `{case_id}`")
+
+progress_bar = st.progress(0)
+status_text = st.empty()
+
 doc_results = []
 errors = []
 
@@ -289,9 +470,15 @@ for expected_type, uf in inputs:
     # duplicates: warn but still process (NO extra fake rows)
     is_dup, prev_decision = fingerprints.is_duplicate(local_path)
     if is_dup:
-        st.warning(f"{expected_type}: fichier déjà analysé avant (prev: {prev_decision}). Je relance l’extraction quand même.")
+        st.warning(f"⚠️ {expected_type}: File already analyzed before (previous: {prev_decision}). Re-analyzing...")
 
     try:
+        # Update progress for current document
+        idx = [x[0] for x in inputs].index(expected_type)
+        progress = (idx) / len(inputs)
+        progress_bar.progress(progress)
+        status_text.markdown(f"**Processing:** {expected_type} ({uf.name})... ⏳")
+        
         ocr_text, structure, tech_report = validator.extract_all(local_path, file_bytes=file_bytes)
         result = validator.validate_with_groq(
             ocr_text,
@@ -339,10 +526,16 @@ for expected_type, uf in inputs:
                 "score": 0,
                 "doc_type": expected_type,
                 "fraud_suspected": False,
-                "reason": f"Erreur: {str(e)}",
+                "reason": f"Error: {str(e)}",
                 "extracted_data": {}
             }
         })
+
+# Complete progress bar
+progress_bar.progress(1.0)
+status_text.success("✅ All documents processed successfully!")
+
+st.divider()
 
 case_decision, case_reason, case_issues = compute_case_decision(doc_results)
 
@@ -411,13 +604,34 @@ with open(os.path.join(case_dir, "report.json"), "w", encoding="utf-8") as fp:
     json.dump(report, fp, ensure_ascii=False, indent=2)
 
 st.divider()
-st.subheader("3) Résultat Case")
-st.write(f"**Case ID:** {case_id}")
-st.write(f"**Décision:** {case_decision}")
-st.caption(case_reason)
+
+# Results section with better styling
+st.subheader("📊 Step 3: Validation Results")
+
+# Decision display with color
+decision_color = "🟢" if case_decision == "ACCEPT" else "🟡"
+st.markdown(f"### {decision_color} **Decision: {case_decision}**")
+
+# Create metrics for overview
+col1, col2, col3, col4 = st.columns(4)
+
+valid_docs = sum(1 for d in doc_results if d["result"].get("decision") == "ACCEPT")
+avg_score = sum(d["result"].get("score", 0) for d in doc_results) / len(doc_results) if doc_results else 0
+fraud_count = sum(1 for d in doc_results if d["result"].get("fraud_suspected", False))
+
+with col1:
+    st.metric("Valid Documents", f"{valid_docs}/4")
+with col2:
+    st.metric("Avg. Score", f"{int(avg_score)}/100")
+with col3:
+    st.metric("Fraud Alerts", fraud_count)
+with col4:
+    st.metric("Issues Found", len(case_issues))
+
+st.markdown(f"**Analysis Summary:** {case_reason}")
 
 st.divider()
-st.subheader("Résumé (exactement 4 lignes)")
+st.subheader("📋 Document Summary Table")
 
 rows = []
 for d in doc_results:
@@ -489,20 +703,34 @@ for d in doc_results:
 st.dataframe(rows, use_container_width=True)
 
 st.divider()
-st.subheader("Cross-check issues")
+st.subheader("🔍 Cross-Document Consistency Check")
 if case_issues:
     for i in case_issues:
-        st.write(f"- {i}")
+        st.warning(f"⚠️ {i}")
 else:
-    st.success("Aucune incohérence détectée.")
+    st.success("✅ All documents are consistent and coherent!")
 
 st.divider()
-st.subheader("Détails par document")
+st.subheader("📑 Detailed Document Analysis")
 for d in doc_results:
     r = d["result"]
     ex = r.get("extracted_data", {}) or {}
-    with st.expander(f"{d['expected_type']} — {d['file_name']} — {r.get('decision')} — {r.get('score',0)}/100"):
-        st.write(f"**Raison:** {to_safe_reason(r.get('reason',''))}")
+    
+    # Color emoji based on decision
+    decision_emoji = "✅" if r.get('decision') == "ACCEPT" else "⚠️"
+    
+    with st.expander(f"{decision_emoji} {d['expected_type']} — {d['file_name']} — Score: {r.get('score',0)}/100"):
+        st.write(f"**Analysis Result:** {to_safe_reason(r.get('reason',''))}")
+        
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            st.metric("Decision", r.get('decision', 'REVIEW'))
+        with col2:
+            st.metric("Confidence", f"{r.get('score', 0)}%")
+        with col3:
+            fraud_status = "🚨 YES" if r.get('fraud_suspected', False) else "✅ No"
+            st.metric("Fraud Suspected", fraud_status)
+        
         st.json(sanitize_dict({
             "expected_type": d["expected_type"],
             "extracted_data": ex,
@@ -517,3 +745,7 @@ try:
     shutil.rmtree(temp_dir, ignore_errors=True)
 except Exception:
     pass
+
+st.divider()
+st.markdown("---")
+st.markdown("<div align='center'><small>🏆 Smart Assurance Validator — Hackathon Project</small></div>", unsafe_allow_html=True)
