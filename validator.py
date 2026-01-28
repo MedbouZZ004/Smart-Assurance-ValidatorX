@@ -28,10 +28,18 @@ def _norm_spaces(s: str) -> str:
 
 def _clean_name(s: str) -> str:
     s = (s or "").strip()
+    # 1. Remove any digits found in the name
     s = re.sub(r"\d+", " ", s)
-    s = re.sub(r"[^A-Za-zÀ-ÖØ-öø-ÿ\s\-']", " ", s)
+
+    # 2. REMOVE THE HYPHEN HERE:
+    # Before: s = re.sub(r"[^A-Za-zÀ-ÖØ-öø-ÿ\s\-']", " ", s)
+    # After:
+    s = re.sub(r"[^A-Za-zÀ-ÖØ-öø-ÿ\s']", " ", s)
+
+    # 3. Collapse the resulting double spaces
     s = re.sub(r"\s+", " ", s).strip()
     return s
+
 
 
 def _normalize_cne(s: str) -> str:
@@ -254,6 +262,7 @@ DIRECTIVES PAR TYPE :
 3. SI TYPE = DEATH :
    - 'deceased_full_name' : Nom de la personne décédée.
    - 'deceased_cne' : Son numéro de CIN/CNIE.
+   - 'death_date' : Extrais UNIQUEMENT la date (DD/MM/YYYY). Ignore l'heure (ex: si le texte dit '17.07 12/01/2026', extrais '12/01/2026').
 
 4. SI TYPE = LIFE_CONTRACT :
    - 'insured_full_name/cne' : Concerne l'ASSURÉ (souvent le défunt).
@@ -361,7 +370,7 @@ TYPE: BANK
 TYPE: DEATH
 {{
   "decision": "REVIEW",
-  "score": 85,
+  "score": 97,
   "country": "MAROC",
   "doc_type": "DEATH",
   "fraud_suspected": false,
@@ -378,7 +387,7 @@ TYPE: DEATH
     "iban_format_valid": true,
     "cne_format_valid": true
   }},
-  "reason": "Certificat décès bien rempli, date décès < aujourd'hui."
+  
 }}
 
 TYPE: LIFE_CONTRACT
@@ -480,12 +489,22 @@ TYPE: LIFE_CONTRACT
             v = _norm_spaces(extracted.get(key, ""))
             if not v:
                 return None
-            ok, _ = validate_date_format(v)
+
+            # --- FIX: Pre-clean dots into slashes for unified format ---
+            v_clean = re.sub(r"[.\-]", "/", v)
+            v_clean = re.sub(r"\s+", "/", v_clean)
+            # -----------------------------------------------------------
+
+            ok, formatted_or_msg = validate_date_format(v_clean)
             if not ok:
                 fv["dates_format_valid"] = False
                 format_errors.append(f"{label} invalide: {v}")
                 return None
-            d = _parse_date_any(v)
+
+            # Update the extracted data with the unified DD/MM/YYYY string
+            extracted[key] = formatted_or_msg
+
+            d = _parse_date_any(formatted_or_msg)
             if not d:
                 fv["dates_format_valid"] = False
                 format_errors.append(f"{label} illisible: {v}")
@@ -515,6 +534,13 @@ TYPE: LIFE_CONTRACT
             # your rule: expiry must be > today
             if exp and exp <= today:
                 format_errors.append("CNI invalide selon règle projet: date expiration doit être > date du jour.")
+            # Use .get() with a default to avoid 'missing' errors if the AI is slightly off
+            cne = extracted.get("cni_cne") or extracted.get("cne") or ""
+            if not cne:
+                format_errors.append("CNE manquant")
+            else:
+                extracted["cni_cne"] = _normalize_cne(cne)
+
 
         # BANK rules
         elif dt == "BANK":

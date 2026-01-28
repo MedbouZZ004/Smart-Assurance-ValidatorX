@@ -166,18 +166,16 @@ def validate_cin_morocco(cin_str: str) -> tuple:
 
 
 def validate_date_format(date_str: str) -> tuple:
-    """
-    Vérifie qu'une date est au format JJ/MM/AAAA, JJ-MM-AAAA ou YYYY-MM-DD.
-    Retourne : (is_valid, formatted_date_dd/mm/yyyy | message)
-    """
     if not date_str:
         return False, "Date vide"
 
-    date_str = date_str.strip()
+    # Replace dots and spaces with slashes immediately
+    date_str = re.sub(r"[.\s\-]", "/", date_str.strip())
 
-    for fmt in ("%d/%m/%Y", "%d-%m-%Y", "%Y-%m-%d"):
+    for fmt in ("%d/%m/%Y", "%Y/%m/%d"):
         try:
             parsed = datetime.strptime(date_str, fmt)
+            # This ensures every date returned is in dd/mm/yyyy format
             return True, parsed.strftime("%d/%m/%Y")
         except ValueError:
             continue
