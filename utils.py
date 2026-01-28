@@ -20,6 +20,9 @@ from datetime import datetime
 def _strip_spaces(s: str) -> str:
     return re.sub(r"\s+", "", (s or ""))
 
+
+
+
 # In utils.py
 
 def normalize_name(s: str) -> str:
@@ -88,6 +91,40 @@ def validate_iban(iban_str: str) -> tuple:
     except Exception as e:
         return False, f"Erreur vérification IBAN : {str(e)}"
 
+def build_iban_ma(bank_code: str, city_code: str, account_number: str, rib_key: str) -> str:
+    """
+    Construit un IBAN marocain valide à partir des composants RIB.
+    Format MA: MA + checksum(2) + RIB(24)
+    RIB = bank(3) + city(3) + account(16) + key(2)
+    """
+    import re
+
+    bank_code = re.sub(r"\D", "", bank_code or "").zfill(3)
+    city_code = re.sub(r"\D", "", city_code or "").zfill(3)
+    account_number = re.sub(r"\D", "", account_number or "")
+    rib_key = re.sub(r"\D", "", rib_key or "").zfill(2)
+
+    # IMPORTANT: le compte doit faire 16 chiffres
+    if len(account_number) > 16:
+        account_number = account_number[-16:]
+    else:
+        account_number = account_number.zfill(16)
+
+    rib = bank_code + city_code + account_number + rib_key  # 24 digits
+
+    # checksum IBAN
+    rearranged = rib + "MA00"
+    numeric = ""
+    for c in rearranged:
+        if c.isdigit():
+            numeric += c
+        else:
+            numeric += str(ord(c) - 55)
+
+    checksum = 98 - (int(numeric) % 97)
+    return f"MA{checksum:02d}{rib}"
+
+
 
 def validate_rib_morocco(rib_str: str) -> tuple:
     digits = re.sub(r"\D", "", rib_str)
@@ -129,18 +166,16 @@ def validate_cin_morocco(cin_str: str) -> tuple:
 
 
 def validate_date_format(date_str: str) -> tuple:
-    """
-    Vérifie qu'une date est au format JJ/MM/AAAA, JJ-MM-AAAA ou YYYY-MM-DD.
-    Retourne : (is_valid, formatted_date_dd/mm/yyyy | message)
-    """
     if not date_str:
         return False, "Date vide"
 
-    date_str = date_str.strip()
+    # Replace dots and spaces with slashes immediately
+    date_str = re.sub(r"[.\s\-]", "/", date_str.strip())
 
-    for fmt in ("%d/%m/%Y", "%d-%m-%Y", "%Y-%m-%d"):
+    for fmt in ("%d/%m/%Y", "%Y/%m/%d"):
         try:
             parsed = datetime.strptime(date_str, fmt)
+            # This ensures every date returned is in dd/mm/yyyy format
             return True, parsed.strftime("%d/%m/%Y")
         except ValueError:
             continue
@@ -311,7 +346,7 @@ def calculate_document_risk_score(
     final_score = max(0, min(100, score))
 
     # Recommendation aligned with "no auto-reject"
-    if final_score >= 90:
+    if final_score >= 85:
         rec = "AUTO-ACCEPT (confiance haute)"
     else:
         rec = "HUMAN REVIEW (à vérifier)"

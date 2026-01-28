@@ -1,9 +1,9 @@
 import streamlit as st
 import os, shutil, json, hashlib, logging, re
 from datetime import datetime
-from validator import InsuranceValidator
 import sqlite3
 
+from validator import InsuranceValidator
 from security import initialize_security, sanitize_dict, mask_value
 
 # -----------------------------
@@ -17,30 +17,25 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# -----------------------------
-# Dirs
-# -----------------------------
 VALID_DIR = "validated_docs"
 REVIEW_DIR = "review_needed"
-INVALID_DIR = "invalid_docs"  # manual only
+INVALID_DIR = "invalid_docs"
 TMP_DIR = "uploads_tmp"
 
 for d in [VALID_DIR, REVIEW_DIR, INVALID_DIR, TMP_DIR]:
     os.makedirs(d, exist_ok=True)
 
-# -----------------------------
-# Security
-# -----------------------------
 sec = initialize_security()
 audit_logger = sec["audit"]
 fingerprints = sec["fingerprints"]
 
 # -----------------------------
-# Audit DB (NO sensitive fields)
+# Audit DB (with migration)
 # -----------------------------
 def init_audit_db():
     conn = sqlite3.connect("audit_trail.db")
     c = conn.cursor()
+
     c.execute("""
         CREATE TABLE IF NOT EXISTS dossiers (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -51,720 +46,706 @@ def init_audit_db():
             score INTEGER,
             decision TEXT,
             fraud_suspected BOOLEAN,
-            doc_type TEXT,
             reason_short TEXT
         )
     """)
     conn.commit()
+
+    # migration: add expected_type if missing
+    c.execute("PRAGMA table_info(dossiers)")
+    cols = [row[1] for row in c.fetchall()]
+    if "expected_type" not in cols:
+        c.execute("ALTER TABLE dossiers ADD COLUMN expected_type TEXT")
+        conn.commit()
+
     conn.close()
 
 init_audit_db()
 
-def compute_file_hash(file_path: str) -> str:
-    sha256 = hashlib.sha256()
-    with open(file_path, "rb") as f:
-        for chunk in iter(lambda: f.read(4096), b""):
-            sha256.update(chunk)
-    return sha256.hexdigest()
+def fuzzy_name_match(name1, name2):
+    if not name1 or not name2 or name1 == "—" or name2 == "—":
+        return False
 
-def to_safe_reason(reason: str, max_len: int = 180) -> str:
+    def norm(n: str) -> list[str]:
+        n = (n or "").upper().replace("-", " ")  # <-- IMPORTANT
+        n = re.sub(r"[^A-Z\s]", " ", n)          # <-- pas "" (sinon ça colle)
+        n = re.sub(r"\s+", " ", n).strip()
+        return sorted(n.split())
+
+    return norm(name1) == norm(name2)
+
+
+def compute_file_hash(file_bytes: bytes) -> str:
+    return hashlib.sha256(file_bytes).hexdigest()
+
+def to_safe_reason(reason: str, max_len: int = 220) -> str:
     r = (reason or "").replace("\n", " ").strip()
     if len(r) > max_len:
         r = r[:max_len] + "..."
     return r
 
-def save_to_audit_db(case_id, file_name, file_hash, score, decision, fraud_suspected, doc_type, reason_short):
+def save_to_audit_db(case_id, expected_type, file_name, file_hash, score, decision, fraud_suspected, reason_short):
     conn = sqlite3.connect("audit_trail.db")
     c = conn.cursor()
     timestamp = datetime.now().isoformat()
     c.execute("""
-        INSERT INTO dossiers (case_id, file_name, file_hash, timestamp, score, decision, fraud_suspected, doc_type, reason_short)
+        INSERT INTO dossiers (case_id, expected_type, file_name, file_hash, timestamp, score, decision, fraud_suspected, reason_short)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-    """, (case_id, file_name, file_hash, timestamp, int(score), decision, int(bool(fraud_suspected)), doc_type, reason_short))
+    """, (case_id, expected_type, file_name, file_hash, timestamp, int(score), decision, int(bool(fraud_suspected)), reason_short))
     conn.commit()
     conn.close()
 
 # -----------------------------
-# Helpers
+# Matching helpers (less dumb than token ratio)
 # -----------------------------
-def safe_get_bank_fields(extracted: dict) -> tuple[str, str]:
-    rib = (extracted.get("bank_rib") or "").strip()
-    iban = (extracted.get("bank_iban") or "").strip()
+def normalize_simple(s: str) -> str:
+    s = (s or "").lower()
 
-    # backward compatibility (old key)
-    if not rib and not iban:
-        legacy = (extracted.get("beneficiary_rib") or "").strip()
-        if legacy.upper().startswith("MA"):
-            iban = legacy
-        else:
-            rib = legacy
+    # IMPORTANT: casser les tirets en espaces (CNI met des tirets)
+    s = s.replace("-", " ")
 
-    return rib or "N/A", iban or "N/A"
-
-def normalize_doc_type(s: str) -> str:
-    return (s or "").strip().lower()
-
-def name_norm(s: str) -> str:
-    s = (s or "").strip().lower()
-    s = re.sub(r"\s+", " ", s)
+    s = re.sub(r"\d+", " ", s)
+    s = re.sub(r"[^a-zàâçéèêëîïôùûüÿñ\s']", " ", s)  # <-- retire le \- ici
+    s = re.sub(r"\s+", " ", s).strip()
     return s
 
-def fuzzy_ratio(a: str, b: str) -> float:
-    a = name_norm(a)
-    b = name_norm(b)
+
+def name_overlap(a: str, b: str) -> float:
+    a, b = normalize_simple(a), normalize_simple(b)
     if not a or not b:
         return 0.0
-    ta = set(re.findall(r"[a-zàâçéèêëîïôùûüÿñ0-9]+", a))
-    tb = set(re.findall(r"[a-zàâçéèêëîïôùûüÿñ0-9]+", b))
-    if not ta or not tb:
+    sa, sb = set(a.split()), set(b.split())
+    if not sa or not sb:
         return 0.0
-    return len(ta & tb) / max(1, len(ta | tb))
+    return len(sa & sb) / max(1, len(sa | sb))
 
-def classify_doc_category(doc_type: str, extracted: dict, ocr_text: str) -> set:
-    """
-    Classification par OCR (robuste) + fallback doc_type.
-    On veut 4 catégories obligatoires: ID, BANK, DEATH, LIFE_CONTRACT
-    """
-    dt = normalize_doc_type(doc_type)
-    t = (ocr_text or "").lower()
-    ex = extracted or {}
-    cats = set()
-
-    # BANK
-    rib, iban = safe_get_bank_fields(ex)
-    bank_kw = [
-        "relevé d'identité bancaire", "releve d'identite bancaire", "rib", "iban",
-        "bic", "swift", "banque", "bank", "agence", "titulaire", "account holder"
-    ]
-    if (rib != "N/A" or iban != "N/A") or any(k in t for k in bank_kw) or any(k in dt for k in bank_kw):
-        cats.add("BANK")
-
-    # DEATH
-    death_kw = [
-        "certificat de décès", "certificat de deces", "acte de décès", "acte de deces",
-        "certificate of death", "date of death", "place where death occurred",
-        "registration no", "registrar"
-    ]
-    if any(k in t for k in death_kw) or any(k in dt for k in ["deces", "décès", "death"]):
-        cats.add("DEATH")
-
-    # LIFE_CONTRACT
-    contract_kw = [
-        "assurance épargne-vie", "assurance epargne-vie", "assurance vie", "life insurance",
-        "numéro de police", "numero de police", "policy number", "policy no",
-        "capital assuré", "capital assure", "clause bénéficiaire", "beneficiaire",
-        "date d’effet", "date d'effet", "contract effective"
-    ]
-    if any(k in t for k in contract_kw) or any(k in dt for k in ["assurance", "contrat", "police", "epargne", "épargne", "life"]):
-        cats.add("LIFE_CONTRACT")
-
-    # ID
-    id_kw = [
-        "carte nationale", "cnie", "cni", "cin", "passport", "passeport", "identity",
-        "date d'expiration", "date expiration", "numéro", "numero", "document"
-    ]
-    if any(k in t for k in id_kw) or any(k in dt for k in ["cni", "cnie", "cin", "passport", "passeport", "identity", "id"]):
-        cats.add("ID")
-
-    return cats
-
-def pick_best_doc(doc_results: list[dict], category: str) -> dict | None:
-    best, best_score = None, -1
-    for d in doc_results:
-        r = d.get("result", {}) or {}
-        ex = r.get("extracted_data", {}) or {}
-        cats = classify_doc_category(r.get("doc_type", ""), ex, d.get("ocr_text", ""))
-        if category in cats:
-            sc = int(r.get("score", 0) or 0)
-            if sc > best_score:
-                best_score = sc
-                best = d
-    return best
-
-# -----------------------------
-# Required documents + fields
-# -----------------------------
-REQUIRED_DOC_LABELS = {
-    "ID": "Pièce d'identité (CNI/Passeport)",
-    "BANK": "RIB/IBAN",
-    "DEATH": "Certificat de décès",
-    "LIFE_CONTRACT": "Contrat assurance épargne-vie",
-}
-
-def required_docs_missing(doc_results: list[dict]) -> list[str]:
-    present = {k: False for k in REQUIRED_DOC_LABELS.keys()}
-    for d in doc_results:
-        r = d.get("result", {}) or {}
-        ex = r.get("extracted_data", {}) or {}
-        cats = classify_doc_category(r.get("doc_type", ""), ex, d.get("ocr_text", ""))
-        for c in cats:
-            if c in present:
-                present[c] = True
-    return [REQUIRED_DOC_LABELS[k] for k, v in present.items() if not v]
-
-def missing_fields_for_doc(category: str, extracted: dict) -> list[str]:
-    """
-    IMPORTANT:
-    - Ne jamais exiger CIN dans BANK
-    - Ne jamais exiger IBAN/RIB dans LIFE_CONTRACT
-    - Chaque doc a ses propres champs
-    """
-    ex = extracted or {}
-    missing = []
-
-    if category == "ID":
-        required = ["beneficiary_name", "beneficiary_cin", "beneficiary_birth_date", "id_document_number", "id_expiry_date"]
-        for k in required:
-            if not (ex.get(k) or "").strip():
-                missing.append(k)
-
-    elif category == "BANK":
-        rib, iban = safe_get_bank_fields(ex)
-        if rib == "N/A" and iban == "N/A":
-            missing.append("bank_rib_or_iban")
-        for k in ["bank_account_holder", "bank_bic", "bank_name"]:
-            if not (ex.get(k) or "").strip():
-                missing.append(k)
-
-    elif category == "DEATH":
-        required = ["deceased_name", "death_date", "death_place", "death_act_number"]
-        for k in required:
-            if not (ex.get(k) or "").strip():
-                missing.append(k)
-
-    elif category == "LIFE_CONTRACT":
-        required = ["policy_number", "subscriber_name", "beneficiary_name", "contract_effective_date"]
-        for k in required:
-            if not (ex.get(k) or "").strip():
-                missing.append(k)
-        capital = (ex.get("capital") or "").strip() or (ex.get("amount") or "").strip() or (ex.get("contract_capital") or "").strip()
-        if not capital:
-            missing.append("capital")
-
-    return missing
-
-def per_document_validation(doc_results: list[dict]) -> tuple[bool, list[str]]:
-    """
-    Vérifie 4 documents par catégorie:
-    - On prend le meilleur doc de chaque catégorie
-    - S'il manque un champ obligatoire dans un doc => dossier REVIEW
-    """
-    issues = []
-    for cat in REQUIRED_DOC_LABELS.keys():
-        d = pick_best_doc(doc_results, cat)
-        if not d:
-            continue
-        ex = (d["result"].get("extracted_data") or {})
-        miss = missing_fields_for_doc(cat, ex)
-        if miss:
-            issues.append(f"{REQUIRED_DOC_LABELS[cat]}: champs manquants -> {', '.join(miss)}")
-    return (len(issues) == 0), issues
-
-def cross_document_validation(doc_results: list[dict]) -> tuple[bool, list[str]]:
-    """
-    Comparaisons autorisées:
-    1) ID <-> LIFE_CONTRACT : beneficiary_name + CIN
-    2) LIFE_CONTRACT <-> DEATH : subscriber_name <-> deceased_name
-    3) ID <-> BANK : beneficiary_name <-> bank_account_holder (pas de CIN ici)
-    """
-    issues = []
-
-    id_doc = pick_best_doc(doc_results, "ID")
-    bank_doc = pick_best_doc(doc_results, "BANK")
-    death_doc = pick_best_doc(doc_results, "DEATH")
-    contract_doc = pick_best_doc(doc_results, "LIFE_CONTRACT")
-
-    if not (id_doc and bank_doc and death_doc and contract_doc):
-        return False, ["Documents insuffisants pour comparaison inter-documents."]
-
-    id_ex = id_doc["result"].get("extracted_data", {}) or {}
-    bank_ex = bank_doc["result"].get("extracted_data", {}) or {}
-    death_ex = death_doc["result"].get("extracted_data", {}) or {}
-    ct_ex = contract_doc["result"].get("extracted_data", {}) or {}
-
-    # 1) ID <-> Contract (beneficiary)
-    id_name = (id_ex.get("beneficiary_name") or "").strip()
-    id_cin = (id_ex.get("beneficiary_cin") or "").strip().upper()
-
-    ct_name = (ct_ex.get("beneficiary_name") or "").strip()
-    ct_cin = (ct_ex.get("beneficiary_cin") or "").strip().upper()
-
-    name_score = fuzzy_ratio(id_name, ct_name)
-    cin_match = bool(id_cin and ct_cin and id_cin == ct_cin)
-
-    if not cin_match:
-        issues.append("CIN bénéficiaire incohérent entre CNI et contrat.")
-    if name_score < 0.70:
-        issues.append("Nom bénéficiaire incohérent entre CNI et contrat.")
-
-    # 2) Contract <-> Death (deceased/subscriber)
-    sub = (ct_ex.get("subscriber_name") or "").strip()
-    dec = (death_ex.get("deceased_name") or "").strip()
-    if fuzzy_ratio(sub, dec) < 0.70:
-        issues.append("Assuré (contrat) ≠ Défunt (certificat de décès).")
-
-    # 3) ID <-> Bank (holder vs beneficiary_name)
-    holder = (bank_ex.get("bank_account_holder") or "").strip()
-    if fuzzy_ratio(id_name, holder) < 0.70:
-        issues.append("Titulaire bancaire (RIB) ≠ Bénéficiaire (CNI).")
-
-    return (len(issues) == 0), issues
-
-# ==================================
-# CROSS-VALIDATION METHODS (NEW)
-# ==================================
-def compute_batch_cross_validation(doc_results: list[dict]) -> dict:
-    """
-    Perform cross-validation across all documents using new transparent scoring rules.
-    """
-    if not doc_results:
-        return {
-            "overall_score": 0,
-            "status": "UNKNOWN",
-            "recommendation": "REVIEW",
-            "issues": ["No documents to validate"]
-        }
-    
-    # Prepare individual validation data
-    validation_data = {}
-    for d in doc_results:
-        r = d.get("result", {})
-        validation_data[d["file_name"]] = {
-            "doc_type": r.get("doc_type", "UNKNOWN"),
-            "extracted_data": r.get("extracted_data", {}),
-            "fraud_suspected": r.get("fraud_suspected", False),
-            "score": r.get("score", 0)
-        }
-    
-    # Use validator's cross-validation method
-    cross_result = validator.cross_validate_documents(validation_data)
-    return cross_result
-
-def display_cross_validation_results(cross_validation: dict) -> None:
-    """
-    Display cross-validation results with transparent scoring breakdown.
-    """
-    st.divider()
-    st.subheader("🔗 Résultat de Validation Croisée")
-    
-    overall_score = cross_validation.get("overall_score", 0)
-    status = cross_validation.get("cross_validation_status", "UNKNOWN")
-    recommendation = cross_validation.get("recommendation", "UNKNOWN")
-    is_valid = cross_validation.get("is_valid", False)
-    
-    # Key metrics
-    col_score, col_status, col_recommendation = st.columns(3)
-    
-    with col_score:
-        st.metric("Score Global", f"{overall_score}/100")
-    
-    with col_status:
-        status_color = "🟢" if status == "VALID" else "🟠" if status == "QUESTIONABLE" else "🔴"
-        st.metric("Statut", f"{status_color} {status}")
-    
-    with col_recommendation:
-        rec_color = "✅" if recommendation == "ACCEPT" else "❌" if recommendation == "REJECT" else "⚠️"
-        st.metric("Recommandation", f"{rec_color} {recommendation}")
-    
-    # Score Breakdown with Logical Rules
-    st.write("**📊 Détail du Calcul du Score:**")
-    score_breakdown = cross_validation.get("score_breakdown", {})
-    
-    if score_breakdown:
-        col_base, col_final = st.columns(2)
-        with col_base:
-            st.metric("Score de Base", score_breakdown.get("base_score", 100))
-        with col_final:
-            st.metric("Score Final", score_breakdown.get("final_score", 0))
-        
-        deductions = score_breakdown.get("deductions", [])
-        if deductions:
-            st.write("**Déductions appliquées:**")
-            for deduction in deductions:
-                st.write(f"- {deduction}")
-    
-    # Detailed Analysis
-    st.write("**Analyse Détaillée:**")
-    
-    col_names, col_dates = st.columns(2)
-    
-    with col_names:
-        st.write("**Correspondance des Noms:**")
-        name_matches = cross_validation.get("name_matches", {})
-        if name_matches.get("deceased_vs_subscriber") is not None:
-            st.write(f"- Défunt ↔️ Assuré: {'✅' if name_matches.get('deceased_vs_subscriber') else '❌'}")
-        if name_matches.get("beneficiary_vs_account_holder") is not None:
-            st.write(f"- Bénéficiaire ↔️ Titulaire: {'✅' if name_matches.get('beneficiary_vs_account_holder') else '❌'}")
-        if name_matches.get("mismatches_found"):
-            st.write("**Incohérences détectées:**")
-            for mismatch in name_matches.get("mismatches_found", []):
-                st.write(f"- {mismatch}")
-    
-    with col_dates:
-        st.write("**Logique des Dates:**")
-        date_logic = cross_validation.get("date_logic_valid", False)
-        st.write(f"Dates cohérentes: {'✅ OUI' if date_logic else '❌ NON'}")
-        if cross_validation.get("date_issues"):
-            for issue in cross_validation.get("date_issues", []):
-                st.write(f"- {issue}")
-    
-    # Critical Documents and Fields
-    col_docs, col_fields = st.columns(2)
-    with col_docs:
-        st.write("**Documents Critiques:**")
-        if cross_validation.get("critical_documents_present"):
-            st.success("✅ Tous les documents critiques présents")
-        else:
-            missing = cross_validation.get("missing_documents", [])
-            st.error(f"❌ Documents manquants: {', '.join(missing) if missing else 'Unknown'}")
-    
-    with col_fields:
-        st.write("**Champs Critiques:**")
-        missing_fields = cross_validation.get("missing_fields", [])
-        if missing_fields:
-            st.error(f"❌ Champs manquants: {len(missing_fields)}")
-            for field in missing_fields[:3]:  # Show first 3
-                st.write(f"- {field}")
-            if len(missing_fields) > 3:
-                st.write(f"- ... et {len(missing_fields) - 3} autres")
-        else:
-            st.success("✅ Tous les champs critiques présents")
-    
-    # Fraud and Discrepancies
-    if cross_validation.get("fraud_indicators"):
-        st.warning("🚩 **Indicateurs de Fraude Détectés:**")
-        for fraud in cross_validation.get("fraud_indicators", []):
-            st.write(f"- {fraud}")
-    
-    if cross_validation.get("low_confidence_documents"):
-        st.warning("⚠️ **Documents avec Faible Confiance:**")
-        for doc in cross_validation.get("low_confidence_documents", []):
-            st.write(f"- {doc}")
-    
-    if cross_validation.get("discrepancies"):
-        st.error("⚠️ **Incohérences Détectées:**")
-        for disc in cross_validation.get("discrepancies", [])[:5]:  # Show first 5
-            st.write(f"- {disc}")
-    
-    st.write("**Explication Détaillée:**")
-    st.info(cross_validation.get("detailed_reason", "No explanation provided"))
-
-def compute_case_decision(doc_results: list[dict]) -> tuple[str, str]:
-    if not doc_results:
-        return "REVIEW", "Aucun document analysé."
-
-    # Step A: required 4 docs
-    missing_docs = required_docs_missing(doc_results)
-    if missing_docs:
-        return "REVIEW", "Document(s) manquant(s): " + ", ".join(missing_docs)
-
-    # Step B: per-document required fields
-    ok_docs, issues = per_document_validation(doc_results)
-    if not ok_docs:
-        return "REVIEW", "Erreur par document: " + " | ".join(issues)
-
-    # Step C: inter-document comparisons
-    ok_cross, cross_issues = cross_document_validation(doc_results)
-    if not ok_cross:
-        return "REVIEW", "Incohérences dossier: " + " | ".join(cross_issues)
-
-    # Step D: any fraud/technical signal => review
-    if any(bool(d["result"].get("fraud_suspected")) for d in doc_results):
-        return "REVIEW", "Signaux techniques détectés (contrôle humain requis)."
-
-    # Step E: strict rule -> if any doc decision REVIEW => dossier REVIEW
-    if any((d["result"].get("decision") != "ACCEPT") for d in doc_results):
-        return "REVIEW", "Au moins un document est en REVIEW."
-
-    return "ACCEPT", "Dossier complet, documents conformes et cohérents."
-
-# -----------------------------
-# Streamlit UI
-# -----------------------------
-st.set_page_config(page_title="Smart Assurance Validator X", layout="wide", page_icon="🛡️")
-st.title("🛡️ Smart Assurance Validator X")
-st.caption("Pré-tri dossier épargne-vie / succession (Maroc). Jamais de rejet automatique.")
-
-@st.cache_resource
-def get_validator():
-    return InsuranceValidator()
-
-validator = get_validator()
-
-st.subheader("1) Upload dossier (4 documents obligatoires)")
-uploaded_files = st.file_uploader(
-    "Ajoute: CNI/Passeport + RIB/IBAN + Certificat de décès + Contrat épargne-vie",
-    accept_multiple_files=True,
-    type=["pdf", "png", "jpg", "jpeg"]
-)
-
-colA, colB = st.columns([1, 1])
-with colA:
-    avoid_duplicates = st.checkbox("Éviter les doublons (cache)", value=True)
-with colB:
-    show_tech = st.checkbox("Afficher détails techniques", value=False)
-
-st.divider()
-st.subheader("2) Analyse dossier")
-
-if st.button("Lancer l'audit IA (dossier)", type="primary"):
-    if not uploaded_files:
-        st.warning("Upload au moins un document.")
-        st.stop()
-
-    case_id = datetime.now().strftime("%Y%m%d_%H%M%S")
-    temp_dir = os.path.join(TMP_DIR, case_id)
-    os.makedirs(temp_dir, exist_ok=True)
-
-    doc_results = []
-    skipped, errors = [], []
-
-    for f in uploaded_files:
-        if f.size > 50 * 1024 * 1024:
-            skipped.append((f.name, "Trop volumineux (>50MB)"))
-            continue
-
-        local_path = os.path.join(temp_dir, f.name)
-        with open(local_path, "wb") as tmp:
-            tmp.write(f.getbuffer())
-
+def parse_date(s: str):
+    s = (s or "").strip()
+    if not s:
+        return None
+    s2 = re.sub(r"[.\-]", "/", s)
+    s2 = re.sub(r"\s+", "/", s2)
+    for fmt in ("%d/%m/%Y", "%Y/%m/%d", "%Y-%m-%d"):
         try:
-            if avoid_duplicates:
-                is_dup, prev = fingerprints.is_duplicate(local_path)
-                if is_dup:
-                    skipped.append((f.name, f"Doublon (déjà vu: {prev})"))
-                    continue
+            return datetime.strptime(s2 if fmt != "%Y-%m-%d" else s, fmt).date()
+        except Exception:
+            pass
+    return None
 
-            file_hash = compute_file_hash(local_path)
+def dates_equal(a: str, b: str) -> bool:
+    da, db = parse_date(a), parse_date(b)
+    if da and db:
+        return da == db
+    return (a or "").strip() == (b or "").strip()
 
-            with st.spinner(f"Analyse : {f.name}"):
-                text, struct, tech_report = validator.extract_all(local_path)
-                result = validator.validate_with_groq(text, struct, tech_report)
+def safe_get_bank_fields(extracted: dict):
+    ex = extracted or {}
+    rib = (ex.get("bank_rib_code") or "").strip()
+    iban = (ex.get("bank_iban") or "").strip()
+    holder = (ex.get("bank_account_holder") or "").strip()
+    return holder, rib or "N/A", iban or "N/A"
 
-            ocr_snippet = (text or "")[:8000]
+def compute_cross_checks(docs: dict) -> list[str]:
+    issues = []
 
-            decision = (result.get("decision") or "REVIEW").upper()
-            if decision not in ["ACCEPT", "REVIEW"]:
-                decision = "REVIEW"
+    id_ex = docs["ID"]["result"].get("extracted_data", {}) or {}
+    bank_ex = docs["BANK"]["result"].get("extracted_data", {}) or {}
+    death_ex = docs["DEATH"]["result"].get("extracted_data", {}) or {}
+    life_ex = docs["LIFE_CONTRACT"]["result"].get("extracted_data", {}) or {}
 
-            score = int(result.get("score", 0) or 0)
-            doc_type = result.get("doc_type", "UNKNOWN")
-            fraud_suspected = bool(result.get("fraud_suspected", False))
-            reason = result.get("reason", "Pas d'explication.")
+    id_name = (id_ex.get("cni_full_name") or "").strip()
+    id_cne = (id_ex.get("cni_cne") or "").strip().upper()
+    id_birth = (id_ex.get("cni_birth_date") or "").strip()
 
-            # technical hard rule => REVIEW
-            if tech_report.get("potential_tampering"):
-                fraud_suspected = True
-                decision = "REVIEW"
-                reason = (reason + " | Signal technique: " + str(tech_report.get("editor_detected", ""))).strip(" |")
+    bank_holder = (bank_ex.get("bank_account_holder") or "").strip()
 
-            fingerprints.register_fingerprint(local_path, decision=decision, score=score)
+    deceased_name = (death_ex.get("deceased_full_name") or "").strip()
+    deceased_cne = (death_ex.get("deceased_cne") or "").strip().upper()
+    deceased_birth = (death_ex.get("deceased_birth_date") or "").strip()
 
-            result["decision"] = decision
-            result["score"] = score
-            result["doc_type"] = doc_type
-            result["fraud_suspected"] = fraud_suspected
-            result["reason"] = reason
+    insured_name = (life_ex.get("insured_full_name") or "").strip()
+    insured_cne = (life_ex.get("insured_cne") or "").strip().upper()
+    insured_birth = (life_ex.get("insured_birth_date") or "").strip()
 
-            wrapped = {
-                "file_name": f.name,
-                "file_hash": file_hash,
-                "local_path": local_path,
-                "result": result,
-                "structure": struct,
-                "tech_report": tech_report,
-                "ocr_text": ocr_snippet,
-            }
-            doc_results.append(wrapped)
+    ben_name = (life_ex.get("beneficiary_full_name") or "").strip()
+    ben_cne = (life_ex.get("beneficiary_cne") or "").strip().upper()
+    ben_birth = (life_ex.get("beneficiary_birth_date") or "").strip()
 
-            audit_logger.log_decision(
-                case_id=case_id,
-                file_name=f.name,
-                file_hash=file_hash,
-                score=score,
-                decision=decision,
-                fraud_suspected=fraud_suspected,
-                doc_type=doc_type,
-                extracted_fields=result.get("extracted_data", {}),
-                reason=to_safe_reason(reason)
-            )
+    # CNI <-> RIB
+    if name_overlap(id_name, bank_holder) < 0.55:
+        issues.append("CNI vs RIB: nom complet ≠ intitulé de compte.")
 
-            save_to_audit_db(
-                case_id=case_id,
-                file_name=f.name,
-                file_hash=file_hash,
-                score=score,
-                decision=decision,
-                fraud_suspected=fraud_suspected,
-                doc_type=doc_type,
-                reason_short=to_safe_reason(reason)
-            )
+    # CNI <-> Assurance (beneficiary)
+    if name_overlap(id_name, ben_name) < 0.55:
+        issues.append("CNI vs Assurance: nom CNI ≠ nom bénéficiaire.")
+    if id_cne and ben_cne and id_cne != ben_cne:
+        issues.append("CNI vs Assurance: CNE CNI ≠ CNE bénéficiaire.")
+    if id_birth and ben_birth and not dates_equal(id_birth, ben_birth):
+        issues.append("CNI vs Assurance: date naissance CNI ≠ date naissance bénéficiaire.")
 
-        except Exception as e:
-            errors.append((f.name, str(e)))
-            logger.error(f"Erreur traitement {f.name}: {str(e)}")
+    # RIB <-> Assurance
+    if name_overlap(bank_holder, ben_name) < 0.55:
+        issues.append("RIB vs Assurance: intitulé de compte ≠ bénéficiaire.")
 
-    if not doc_results:
-        st.warning("Aucun document analysé.")
-        st.stop()
+    # Décès <-> Assurance (insured)
+    if name_overlap(deceased_name, insured_name) < 0.55:
+        issues.append("Décès vs Assurance: nom décédé ≠ nom assuré.")
+    if deceased_cne and insured_cne and deceased_cne != insured_cne:
+        issues.append("Décès vs Assurance: CNE décédé ≠ CNE assuré.")
+    if deceased_birth and insured_birth and not dates_equal(deceased_birth, insured_birth):
+        issues.append("Décès vs Assurance: naissance décédé ≠ naissance assuré.")
 
-    # ====================================
-    # CROSS-VALIDATION ANALYSIS (NEW)
-    # ====================================
-    cross_validation_result = compute_batch_cross_validation(doc_results)
+    # sanity: insured != beneficiary
+    if insured_name and ben_name and name_overlap(insured_name, ben_name) > 0.85:
+        issues.append("Assurance: assuré et bénéficiaire semblent identiques (possible inversion).")
 
-    # DOSSIER DECISION
-    case_decision, case_reason = compute_case_decision(doc_results)
+    return issues
 
-    dest_root = VALID_DIR if case_decision == "ACCEPT" else REVIEW_DIR
-    case_dir = os.path.join(dest_root, case_id)
-    os.makedirs(case_dir, exist_ok=True)
+def compute_case_decision(doc_results):
+    docs = {d["expected_type"]: d for d in doc_results}
+    missing = [k for k in ["ID", "BANK", "DEATH", "LIFE_CONTRACT"] if k not in docs]
+    if missing:
+        return "REVIEW", "Documents manquants: " + ", ".join(missing), ["Missing docs"]
 
-    for d in doc_results:
-        shutil.copy(d["local_path"], os.path.join(case_dir, d["file_name"]))
+    per_doc_issues = []
+    for k in ["ID", "BANK", "DEATH", "LIFE_CONTRACT"]:
+        r = docs[k]["result"]
+        if r.get("decision") != "ACCEPT":
+            per_doc_issues.append(f"{k}: {to_safe_reason(r.get('reason','')) or 'REVIEW'}")
 
-    report = {
-        "case_id": case_id,
-        "case_decision": case_decision,
-        "case_reason": case_reason,
-        "timestamp": datetime.now().isoformat(),
-        "skipped": [{"file": n, "why": w} for n, w in skipped],
-        "errors": [{"file": n, "error": m} for n, m in errors],
-        "documents": []
+    cross_issues = compute_cross_checks(docs)
+
+    if not per_doc_issues and not cross_issues:
+        return "ACCEPT", "OK: 4 docs + validations + cohérences inter-documents.", []
+
+    issues = per_doc_issues + cross_issues
+    return "REVIEW", " | ".join(issues)[:500], issues
+
+# -----------------------------
+# UI
+# Custom CSS for better styling
+# -----------------------------
+st.set_page_config(page_title="Insurance Validator", layout="wide", initial_sidebar_state="expanded")
+
+# Custom CSS styling
+custom_css = """
+<style>
+    /* Main styling */
+    .main {
+        background: linear-gradient(135deg, #0f1419 0%, #1a1f2e 100%);
     }
+    
+    /* Header styling */
+    h1, h2, h3 {
+        color: #e0e8f0;
+        font-weight: 700;
+        letter-spacing: -0.5px;
+    }
+    
+    h1 {
+        font-size: 2.5rem !important;
+        margin-bottom: 0.5rem !important;
+    }
+    
+    /* Divider enhancement */
+    hr {
+        margin: 2rem 0 !important;
+        border: none;
+        height: 2px;
+        background: linear-gradient(90deg, #667eea 0%, transparent 50%, #667eea 100%);
+    }
+    
+    /* Button styling */
+    .stButton > button {
+        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+        color: white !important;
+        border: none;
+        border-radius: 8px;
+        padding: 0.75rem 2rem !important;
+        font-weight: 600;
+        transition: all 0.3s ease;
+        box-shadow: 0 4px 15px rgba(102, 126, 234, 0.4);
+    }
+    
+    .stButton > button:hover {
+        transform: translateY(-2px);
+        box-shadow: 0 6px 20px rgba(102, 126, 234, 0.6);
+    }
+    
+    /* File uploader styling */
+    .stFileUploader {
+        background: linear-gradient(135deg, rgba(102, 126, 234, 0.15) 0%, rgba(118, 75, 162, 0.15) 100%);
+        border: 2px solid rgba(102, 126, 234, 0.3);
+        border-radius: 12px;
+        padding: 1.5rem;
+        box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
+        margin-bottom: 1rem;
+    }
+    
+    /* Success/Warning/Error messages */
+    .stAlert {
+        border-radius: 10px;
+        border-left: 4px solid;
+        padding: 1rem;
+        margin: 1rem 0;
+        background: rgba(255, 255, 255, 0.05) !important;
+    }
+    
+    /* Dataframe styling */
+    .stDataFrame {
+        border-radius: 10px;
+        overflow: hidden;
+        box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
+        background: rgba(30, 41, 59, 0.8) !important;
+    }
+    
+    /* Expander styling */
+    .streamlit-expanderHeader {
+        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+        border-radius: 8px;
+        color: white !important;
+    }
+    
+    /* Metric styling */
+    .stMetric {
+        background: linear-gradient(135deg, rgba(102, 126, 234, 0.2) 0%, rgba(118, 75, 162, 0.2) 100%);
+        border: 1px solid rgba(102, 126, 234, 0.3);
+        border-radius: 10px;
+        padding: 1rem;
+        box-shadow: 0 2px 8px rgba(0, 0, 0, 0.5);
+    }
+</style>
+"""
+st.markdown(custom_css, unsafe_allow_html=True)
 
-    for d in doc_results:
-        r = d["result"]
-        ex = r.get("extracted_data", {}) or {}
-        rib, iban = safe_get_bank_fields(ex)
-        cats = classify_doc_category(r.get("doc_type", ""), ex, d.get("ocr_text", ""))
+# Main title with description
+col1, col2 = st.columns([3, 1])
+with col1:
+    st.title("🏢 Insurance Document Validator")
+    st.markdown("**Smart succession document analysis system** • Automated verification & fraud detection")
 
-        report["documents"].append({
-            "file_name": d["file_name"],
-            "doc_type": r.get("doc_type", "UNKNOWN"),
-            "categories": sorted(list(cats)),
-            "decision": r.get("decision", "REVIEW"),
-            "score": r.get("score", 0),
-            "fraud_suspected": bool(r.get("fraud_suspected", False)),
-            "reason_short": to_safe_reason(r.get("reason", "")),
-            "extracted_preview": sanitize_dict({
-                "beneficiary_name": ex.get("beneficiary_name", "N/A"),
-                "beneficiary_cin": ex.get("beneficiary_cin", "N/A"),
-                "subscriber_name": ex.get("subscriber_name", "N/A"),
-                "deceased_name": ex.get("deceased_name", "N/A"),
-                "policy_number": ex.get("policy_number", "N/A"),
-                "bank_account_holder": ex.get("bank_account_holder", "N/A"),
-                "bank_rib": rib,
-                "bank_iban": iban,
-                "bank_bic": ex.get("bank_bic", "N/A"),
-                "bank_name": ex.get("bank_name", "N/A"),
-            })
-        })
+# Sidebar
+st.sidebar.title("⚙️ Settings & Maintenance")
 
-    with open(os.path.join(case_dir, "report.json"), "w", encoding="utf-8") as fp:
-        json.dump(report, fp, ensure_ascii=False, indent=2)
+# Check if we're in cache clear mode
+if "clear_cache_mode" not in st.session_state:
+    st.session_state.clear_cache_mode = False
 
+if st.sidebar.button("🧹 Clear Cache", use_container_width=True):
+    st.session_state.clear_cache_mode = True
+
+# Display cache clear confirmation page
+if st.session_state.clear_cache_mode:
     st.divider()
-    st.subheader("3) Résultat")
-
-    if case_decision == "ACCEPT":
-        st.success(f"✅ PRÉ-TRI: ACCEPT — Case ID: {case_id}")
-    else:
-        st.warning(f"⚠️ PRÉ-TRI: REVIEW — Case ID: {case_id}")
-
-    st.caption(case_reason)
-
+    st.subheader("🗑️ Clear Cache & Reset System")
+    
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        st.warning("⚠️ This will delete all cached results, databases, and temporary files.")
+        st.write("**Affected items:**")
+        st.markdown("""
+        - Audit database (audit_trail.db)
+        - Fingerprint cache (fingerprints.json)
+        - Temporary uploads folder
+        - Validated documents folder
+        - Review needed folder
+        """)
+    
+    with col2:
+        st.info("This action cannot be undone. Make sure you have backed up any important data.")
+    
     st.divider()
-    st.subheader("Résumé documents")
+    
+    col_btn1, col_btn2, col_btn3 = st.columns([2, 2, 1])
+    
+    with col_btn1:
+        if st.button("✅ Confirm Clear", use_container_width=True, key="confirm_clear"):
+            # nuke db + fingerprints + folders
+            for f in ["audit_trail.db", "fingerprints.json"]:
+                if os.path.exists(f):
+                    os.remove(f)
 
-    rows = []
-    for d in doc_results:
-        r = d["result"]
-        ex = r.get("extracted_data", {}) or {}
-        rib, iban = safe_get_bank_fields(ex)
-        cats = classify_doc_category(r.get("doc_type", ""), ex, d.get("ocr_text", ""))
+            for d in [VALID_DIR, REVIEW_DIR, TMP_DIR]:
+                if os.path.exists(d):
+                    shutil.rmtree(d, ignore_errors=True)
+                    os.makedirs(d, exist_ok=True)
 
-        rows.append({
-            "Fichier": d["file_name"],
-            "Catégorie (OCR)": ", ".join(sorted(cats)) if cats else "—",
-            "Décision": r.get("decision", "REVIEW"),
-            "Score": r.get("score", 0),
-            "Signaux": "Y" if r.get("fraud_suspected") else "—",
-            "Benef (nom)": ex.get("beneficiary_name", "N/A"),
-            "Benef (CIN)": mask_value(ex.get("beneficiary_cin", "N/A"), keep_last=3),
-            "Assuré": ex.get("subscriber_name", "N/A"),
-            "Défunt": ex.get("deceased_name", "N/A"),
-            "RIB": mask_value(re.sub(r"\D", "", rib), keep_last=4) if rib != "N/A" else "N/A",
-            "IBAN": mask_value(iban, keep_last=4) if iban != "N/A" else "N/A",
-            "BIC": ex.get("bank_bic", "N/A"),
-            "Banque": ex.get("bank_name", "N/A"),
-        })
+            st.success("✅ Cache cleared successfully! System reset complete.")
+            st.session_state.clear_cache_mode = False
+            st.balloons()
+            st.stop()
+    
+    with col_btn2:
+        if st.button("❌ Cancel", use_container_width=True, key="cancel_clear"):
+            st.session_state.clear_cache_mode = False
+            st.rerun()
+    
+    st.stop()
 
-    st.dataframe(rows, use_container_width=True)
+show_ocr_debug = st.checkbox("🔍 Show OCR Debug (technical details)", value=False)
 
-    # Display Cross-Validation Results
-    display_cross_validation_results(cross_validation_result)
+# Upload Section
+st.divider()
+st.subheader("📤 Step 1: Upload Required Documents")
+st.markdown("Please upload **all 4 documents** in the appropriate categories below. Accepted formats: PDF, PNG, JPG, JPEG, WebP")
 
-    st.divider()
-    st.subheader("Détails")
-    for d in doc_results:
-        r = d["result"]
-        ex = r.get("extracted_data", {}) or {}
-        cats = classify_doc_category(r.get("doc_type", ""), ex, d.get("ocr_text", ""))
+types = ["pdf", "png", "jpg", "jpeg", "webp"]
 
-        with st.expander(f"📄 {d['file_name']} — {r.get('decision')} — {r.get('score', 0)}/100", expanded=False):
-            st.write(f"**Type (LLM):** {r.get('doc_type', 'UNKNOWN')} | **Catégorie (OCR):** {', '.join(sorted(cats)) if cats else '—'}")
-            st.write(f"**Signaux:** {'Oui' if r.get('fraud_suspected') else 'Non'}")
-            st.write(f"**Raison:** {to_safe_reason(r.get('reason', ''))}")
+# Create a better layout for file uploads
+col1, col2 = st.columns(2)
 
-            st.json(sanitize_dict({
-                "extracted_data": ex,
-                "format_validation": r.get("format_validation", {}),
-                "dates_extracted": r.get("dates_extracted", {}),
-                "tech_report": d.get("tech_report", {}),
-                "structure": d.get("structure", {}),
-            }))
+with col1:
+    st.markdown("#### 📋 Identity Documents")
+    cni_file = st.file_uploader("📌 1. National ID (CNI/CNIE)", type=types, accept_multiple_files=False, key="cni")
+    if cni_file:
+        st.caption(f"✅ {cni_file.name} ({cni_file.size} bytes)")
+    
+    st.markdown("#### 💼 Insurance Documents")
+    life_file = st.file_uploader("📌 4. Life Savings Policy (épargne-vie)", type=types, accept_multiple_files=False, key="life")
+    if life_file:
+        st.caption(f"✅ {life_file.name} ({life_file.size} bytes)")
 
-            if show_tech:
-                st.text((d.get("ocr_text") or "")[:1200])
+with col2:
+    st.markdown("#### 📄 Administrative Documents")
+    death_file = st.file_uploader("📌 3. Death Certificate", type=types, accept_multiple_files=False, key="death")
+    if death_file:
+        st.caption(f"✅ {death_file.name} ({death_file.size} bytes)")
+    
+    st.markdown("#### 🏦 Banking Documents")
+    rib_file = st.file_uploader("📌 2. Bank Account Details (RIB/IBAN)", type=types, accept_multiple_files=False, key="rib")
+    if rib_file:
+        st.caption(f"✅ {rib_file.name} ({rib_file.size} bytes)")
+
+if not (cni_file and rib_file and death_file and life_file):
+    st.info("⏳ Waiting for all 4 documents to be uploaded...")
+    st.stop()
+
+# Progress indicator
+progress_placeholder = st.empty()
+st.divider()
+
+col_center = st.columns([1, 2, 1])[1]
+with col_center:
+    if st.button("🚀 Start Analysis", use_container_width=True, key="start_analysis"):
+        st.session_state.analysis_started = True
+
+if "analysis_started" not in st.session_state or not st.session_state.analysis_started:
+    st.stop()
+
+inputs = [
+    ("ID", cni_file),
+    ("BANK", rib_file),
+    ("DEATH", death_file),
+    ("LIFE_CONTRACT", life_file),
+]
+
+validator = InsuranceValidator()
+
+case_id = hashlib.sha256(
+    ("|".join([f.name for _, f in inputs]) + str(datetime.now().timestamp())).encode("utf-8")
+).hexdigest()[:10]
+
+temp_dir = os.path.join(TMP_DIR, case_id)
+os.makedirs(temp_dir, exist_ok=True)
+
+# Processing section with progress
+st.subheader("⚙️ Step 2: Processing Documents")
+st.caption(f"Case ID: `{case_id}`")
+
+progress_bar = st.progress(0)
+status_text = st.empty()
+
+doc_results = []
+errors = []
+
+for expected_type, uf in inputs:
+    file_bytes = uf.getbuffer().tobytes()
+    file_hash = compute_file_hash(file_bytes)
+
+    local_path = os.path.join(temp_dir, uf.name)
+    with open(local_path, "wb") as f:
+        f.write(file_bytes)
+
+    # duplicates: warn but still process (NO extra fake rows)
+    is_dup, prev_decision = fingerprints.is_duplicate(local_path)
+    if is_dup:
+        st.warning(f"⚠️ {expected_type}: File already analyzed before (previous: {prev_decision}). Re-analyzing...")
 
     try:
-        shutil.rmtree(temp_dir, ignore_errors=True)
-    except Exception:
-        pass
+        # Update progress for current document
+        idx = [x[0] for x in inputs].index(expected_type)
+        progress = (idx) / len(inputs)
+        progress_bar.progress(progress)
+        status_text.markdown(f"**Processing:** {expected_type} ({uf.name})... ⏳")
+        
+        ocr_text, structure, tech_report = validator.extract_all(local_path, file_bytes=file_bytes)
+        result = validator.validate_with_groq(
+            ocr_text,
+            structure,
+            tech_report,
+            forced_doc_type=expected_type,
+        )
 
-# -----------------------------
-# Sidebar
-# -----------------------------
-st.sidebar.title("📊 Dashboard")
+        doc_results.append({
+            "expected_type": expected_type,
+            "file_name": uf.name,
+            "local_path": local_path,
+            "file_hash": file_hash,
+            "ocr_text": ocr_text,
+            "structure": structure,
+            "tech_report": tech_report,
+            "result": result
+        })
 
-def count_cases(base_dir: str) -> int:
-    if not os.path.exists(base_dir):
-        return 0
-    return len([d for d in os.listdir(base_dir) if os.path.isdir(os.path.join(base_dir, d))])
+        fingerprints.register_fingerprint(local_path, result.get("decision", "REVIEW"), int(result.get("score", 0)))
 
-st.sidebar.write(f"✅ ACCEPT : {count_cases(VALID_DIR)}")
-st.sidebar.write(f"⏳ REVIEW : {count_cases(REVIEW_DIR)}")
+        save_to_audit_db(
+            case_id=case_id,
+            expected_type=expected_type,
+            file_name=uf.name,
+            file_hash=file_hash,
+            score=result.get("score", 0),
+            decision=result.get("decision", "REVIEW"),
+            fraud_suspected=result.get("fraud_suspected", False),
+            reason_short=to_safe_reason(result.get("reason", "")),
+        )
 
-if st.sidebar.button("🗑️ Vider tous les dossiers"):
-    for d in [VALID_DIR, REVIEW_DIR, INVALID_DIR]:
-        if os.path.exists(d):
-            shutil.rmtree(d, ignore_errors=True)
-            os.makedirs(d, exist_ok=True)
-    st.rerun()
+    except Exception as e:
+        errors.append((uf.name, str(e)))
+        doc_results.append({
+            "expected_type": expected_type,
+            "file_name": uf.name,
+            "local_path": local_path,
+            "file_hash": file_hash,
+            "ocr_text": "",
+            "structure": {},
+            "tech_report": {},
+            "result": {
+                "decision": "REVIEW",
+                "score": 0,
+                "doc_type": expected_type,
+                "fraud_suspected": False,
+                "reason": f"Error: {str(e)}",
+                "extracted_data": {}
+            }
+        })
 
-if st.sidebar.button("📋 Audit trail (20 derniers)"):
-    st.sidebar.subheader("Historique")
-    conn = sqlite3.connect("audit_trail.db")
-    c = conn.cursor()
-    c.execute("""
-        SELECT case_id, file_name, timestamp, score, decision, fraud_suspected
-        FROM dossiers
-        ORDER BY timestamp DESC
-        LIMIT 20
-    """)
-    rows = c.fetchall()
-    conn.close()
-    for row in rows:
-        case_id, file_name, ts, score, decision, fraud = row
-        st.sidebar.caption(f"{case_id} | {file_name} | {score}/100 | {decision} | signaux:{'Y' if fraud else 'N'}")
+# Complete progress bar
+progress_bar.progress(1.0)
+status_text.success("✅ All documents processed successfully!")
+
+st.divider()
+
+case_decision, case_reason, case_issues = compute_case_decision(doc_results)
+
+# Get names/CNEs from our main variables
+id_data = next((d for d in doc_results if d["expected_type"] == "ID"), None)
+bank_data = next((d for d in doc_results if d["expected_type"] == "BANK"), None)
+death_data = next((d for d in doc_results if d["expected_type"] == "DEATH"), None)
+life_data = next((d for d in doc_results if d["expected_type"] == "LIFE_CONTRACT"), None)
+
+# 1. CNI vs BANK (Fuzzy name match)
+if id_data and bank_data:
+    name_id = id_data["result"]["extracted_data"].get("cni_full_name")
+    name_bank = bank_data["result"]["extracted_data"].get("bank_account_holder")
+    if not fuzzy_name_match(name_id, name_bank):
+        case_issues.append(f"CNI vs BANK: Nom CNI ({name_id}) ≠ Titulaire RIB ({name_bank})")
+
+# 2. DEATH vs LIFE_CONTRACT (Match Insured to Deceased)
+if death_data and life_data:
+    cne_death = death_data["result"]["extracted_data"].get("deceased_cne")
+    cne_insured = life_data["result"]["extracted_data"].get("insured_cne")
+    if cne_death and cne_insured and cne_death != cne_insured:
+        case_issues.append(f"Décès vs Assurance: CNE décédé ({cne_death}) ≠ CNE assuré ({cne_insured})")
+
+# 3. CNI vs LIFE_CONTRACT (Match Beneficiary to CNI)
+if id_data and life_data:
+    cne_id = id_data["result"]["extracted_data"].get("cni_cne")
+    cne_benef = life_data["result"]["extracted_data"].get("beneficiary_cne")
+    if cne_id and cne_benef and cne_id != cne_benef:
+        case_issues.append(f"CNI vs Assurance: CNE bénéficiaire ({cne_benef}) ≠ CNE CNI ({cne_id})")
+dest_root = VALID_DIR if case_decision == "ACCEPT" else REVIEW_DIR
+case_dir = os.path.join(dest_root, case_id)
+os.makedirs(case_dir, exist_ok=True)
+
+for d in doc_results:
+    if os.path.exists(d["local_path"]):
+        shutil.copy(d["local_path"], os.path.join(case_dir, d["file_name"]))
+
+report = {
+    "case_id": case_id,
+    "case_decision": case_decision,
+    "case_reason": case_reason,
+    "timestamp": datetime.now().isoformat(),
+    "errors": [{"file": n, "error": m} for n, m in errors],
+    "issues": case_issues,
+    "documents": []
+}
+
+for d in doc_results:
+    r = d["result"]
+    ex = r.get("extracted_data", {}) or {}
+    holder, rib, iban = safe_get_bank_fields(ex)
+    report["documents"].append({
+        "expected_type": d["expected_type"],
+        "file_name": d["file_name"],
+        "decision": r.get("decision", "REVIEW"),
+        "score": r.get("score", 0),
+        "fraud_suspected": bool(r.get("fraud_suspected", False)),
+        "reason": r.get("reason", ""),
+        "extracted_data": ex,
+        "bank_account_holder": holder,
+        "bank_rib_code": rib,
+        "bank_iban": iban
+    })
+
+with open(os.path.join(case_dir, "report.json"), "w", encoding="utf-8") as fp:
+    json.dump(report, fp, ensure_ascii=False, indent=2)
+
+st.divider()
+
+# Results section with better styling
+st.subheader("📊 Step 3: Validation Results")
+
+# Decision display with color
+decision_color = "🟢" if case_decision == "ACCEPT" else "🟡"
+st.markdown(f"### {decision_color} **Decision: {case_decision}**")
+
+# Create metrics for overview
+col1, col2, col3, col4 = st.columns(4)
+
+valid_docs = sum(1 for d in doc_results if d["result"].get("decision") == "ACCEPT")
+avg_score = sum(d["result"].get("score", 0) for d in doc_results) / len(doc_results) if doc_results else 0
+fraud_count = sum(1 for d in doc_results if d["result"].get("fraud_suspected", False))
+
+with col1:
+    st.metric("Valid Documents", f"{valid_docs}/4")
+with col2:
+    st.metric("Avg. Score", f"{int(avg_score)}/100")
+with col3:
+    st.metric("Fraud Alerts", fraud_count)
+with col4:
+    st.metric("Issues Found", len(case_issues))
+
+st.markdown(f"**Analysis Summary:** {case_reason}")
+
+st.divider()
+st.subheader("📋 Document Summary Table")
+
+rows = []
+for d in doc_results:
+    r = d["result"]
+    ex = r.get("extracted_data", {}) or {}
+    holder, rib, iban = safe_get_bank_fields(ex)
+
+    # ... inside your loop where you define 'ex' (extracted_data) ...
+
+    # 1. Initialize empty values for our target columns
+    cni_nom, cni_cne, cni_naiss, cni_exp = "—", "—", "—", "—"
+    deces_nom, deces_cne, deces_date = "—", "—", "—"
+
+    # 2. Apply Conditional Mapping based on expected_type
+    if d["expected_type"] == "ID":
+        cni_nom = ex.get("cni_full_name", "—")
+        cni_cne = ex.get("cni_cne", "—")
+        cni_naiss = ex.get("cni_birth_date", "—")
+        cni_exp = ex.get("cni_expiry_date", "—")
+
+    elif d["expected_type"] == "DEATH":
+        deces_nom = ex.get("deceased_full_name", "—")
+        deces_cne = ex.get("deceased_cne", "—")
+        deces_date = ex.get("death_date", "—")
+        cni_naiss = ex.get("deceased_birth_date", "—")
+
+    elif d["expected_type"] == "LIFE_CONTRACT":
+        # As requested: BÉNÉFICIAIRE goes to CNI cells
+        cni_nom = ex.get("beneficiary_full_name", "—")
+        cni_cne = ex.get("beneficiary_cne", "—")
+        cni_naiss = ex.get("beneficiary_birth_date", "—")
+
+        # As requested: ASSURÉ goes to DÉCÈS cells
+        deces_nom = ex.get("insured_full_name", "—")
+        deces_cne = ex.get("insured_cne", "—")
+        deces_date = ex.get("insured_birth_date", "—") # Using birth date since death date doesn't exist for insured here
+
+    # 3. Now append the row using these variables
+    rows.append({
+        "Doc attendu": d["expected_type"],
+        "Fichier": d["file_name"],
+        "Décision": r.get("decision", "REVIEW"),
+        "Score": r.get("score", 0),
+
+        # CNI Columns (Mapped based on logic above)
+        "CNI (nom)": cni_nom,
+        "CNI (CNE)": mask_value(cni_cne, keep_last=3) if cni_cne != "—" else "—",
+        "CNI (naiss.)": cni_naiss,
+        "CNI (exp.)": cni_exp,
+
+        # BANK Section
+        "RIB (titulaire)": holder or "—",
+        "RIB": mask_value(re.sub(r"\D", "", rib), keep_last=4) if rib != "N/A" else "—",
+        "IBAN": mask_value(iban.replace(" ", ""), keep_last=4) if iban != "N/A" else "—",
+
+        # DEATH Columns (Mapped based on logic above)
+        "Décès (nom)": deces_nom,
+        "Décès (CNE)": mask_value(deces_cne, keep_last=3) if deces_cne != "—" else "—",
+        "Date décès": deces_date,
+
+        # LIFE_CONTRACT Section (Keeping raw keys for clarity in those specific columns)
+        "Assuré (nom)": ex.get("insured_full_name", "—"),
+        "Assuré (CNE)": mask_value((ex.get("insured_cne", "—") or ""), keep_last=3),
+        "Benef (nom)": ex.get("beneficiary_full_name", "—"),
+        "Benef (CNE)": mask_value((ex.get("beneficiary_cne", "—") or ""), keep_last=3),
+    })
+
+
+st.dataframe(rows, use_container_width=True)
+
+st.divider()
+st.subheader("🔍 Cross-Document Consistency Check")
+if case_issues:
+    for i in case_issues:
+        st.warning(f"⚠️ {i}")
+else:
+    st.success("✅ All documents are consistent and coherent!")
+
+st.divider()
+st.subheader("📑 Detailed Document Analysis")
+for d in doc_results:
+    r = d["result"]
+    ex = r.get("extracted_data", {}) or {}
+    
+    # Color emoji based on decision
+    decision_emoji = "✅" if r.get('decision') == "ACCEPT" else "⚠️"
+    
+    with st.expander(f"{decision_emoji} {d['expected_type']} — {d['file_name']} — Score: {r.get('score',0)}/100"):
+        st.write(f"**Analysis Result:** {to_safe_reason(r.get('reason',''))}")
+        
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            st.metric("Decision", r.get('decision', 'REVIEW'))
+        with col2:
+            st.metric("Confidence", f"{r.get('score', 0)}%")
+        with col3:
+            fraud_status = "🚨 YES" if r.get('fraud_suspected', False) else "✅ No"
+            st.metric("Fraud Suspected", fraud_status)
+        
+        st.json(sanitize_dict({
+            "expected_type": d["expected_type"],
+            "extracted_data": ex,
+            "format_validation": r.get("format_validation", {}),
+            "tech_report": d.get("tech_report", {}),
+            "structure": d.get("structure", {}),
+        }))
+        if show_ocr_debug:
+            st.text((d.get("ocr_text") or "")[:2000])
+
+try:
+    shutil.rmtree(temp_dir, ignore_errors=True)
+except Exception:
+    pass
+
+st.divider()
+st.markdown("---")
+st.markdown("<div align='center'><small>🏆 Smart Assurance Validator — Hackathon Project</small></div>", unsafe_allow_html=True)

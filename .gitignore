@@ -15,3 +15,26 @@ temp_uploads/
 validated_docs/
 *.pyc
 /.pytest_cache/
+# Virtual env
+.venv/
+
+# Logs & runtime
+logs/
+*.log
+
+# Local databases
+*.db
+
+# Generated folders
+review_needed/
+validated_docs/
+invalid_docs/
+uploads_tmp/
+
+# Secrets
+.encryption_key
+fingerprints.json
+
+# Python cache
+__pycache__/
+*.pyc
