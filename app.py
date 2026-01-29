@@ -51,7 +51,7 @@ def init_audit_db():
     """)
     conn.commit()
 
-    # migration: add expected_type if missing
+    
     c.execute("PRAGMA table_info(dossiers)")
     cols = [row[1] for row in c.fetchall()]
     if "expected_type" not in cols:
@@ -67,8 +67,8 @@ def fuzzy_name_match(name1, name2):
         return False
 
     def norm(n: str) -> list[str]:
-        n = (n or "").upper().replace("-", " ")  # <-- IMPORTANT
-        n = re.sub(r"[^A-Z\s]", " ", n)          # <-- pas "" (sinon ça colle)
+        n = (n or "").upper().replace("-", " ")  
+        n = re.sub(r"[^A-Z\s]", " ", n)          
         n = re.sub(r"\s+", " ", n).strip()
         return sorted(n.split())
 
@@ -96,16 +96,16 @@ def save_to_audit_db(case_id, expected_type, file_name, file_hash, score, decisi
     conn.close()
 
 # -----------------------------
-# Matching helpers (less dumb than token ratio)
+# Matching helpers 
 # -----------------------------
 def normalize_simple(s: str) -> str:
     s = (s or "").lower()
 
-    # IMPORTANT: casser les tirets en espaces (CNI met des tirets)
+   
     s = s.replace("-", " ")
 
     s = re.sub(r"\d+", " ", s)
-    s = re.sub(r"[^a-zàâçéèêëîïôùûüÿñ\s']", " ", s)  # <-- retire le \- ici
+    s = re.sub(r"[^a-zàâçéèêëîïôùûüÿñ\s']", " ", s)  
     s = re.sub(r"\s+", " ", s).strip()
     return s
 
@@ -221,10 +221,7 @@ def compute_case_decision(doc_results):
     issues = per_doc_issues + cross_issues
     return "REVIEW", " | ".join(issues)[:500], issues
 
-# -----------------------------
-# UI
-# Custom CSS for better styling
-# -----------------------------
+
 st.set_page_config(page_title="Insurance Validator", layout="wide", initial_sidebar_state="expanded")
 
 # Custom CSS styling
@@ -337,12 +334,12 @@ if st.sidebar.button("🧹 Clear Cache", use_container_width=True):
 # Display cache clear confirmation page
 if st.session_state.clear_cache_mode:
     st.divider()
-    st.subheader("🗑️ Clear Cache & Reset System")
+    st.subheader("Clear Cache & Reset System")
     
     col1, col2 = st.columns(2)
     
     with col1:
-        st.warning("⚠️ This will delete all cached results, databases, and temporary files.")
+        st.warning("This will delete all cached results, databases, and temporary files.")
         st.write("**Affected items:**")
         st.markdown("""
         - Audit database (audit_trail.db)
@@ -360,7 +357,7 @@ if st.session_state.clear_cache_mode:
     col_btn1, col_btn2, col_btn3 = st.columns([2, 2, 1])
     
     with col_btn1:
-        if st.button("✅ Confirm Clear", use_container_width=True, key="confirm_clear"):
+        if st.button("Confirm Clear", use_container_width=True, key="confirm_clear"):
             # nuke db + fingerprints + folders
             for f in ["audit_trail.db", "fingerprints.json"]:
                 if os.path.exists(f):
@@ -371,54 +368,53 @@ if st.session_state.clear_cache_mode:
                     shutil.rmtree(d, ignore_errors=True)
                     os.makedirs(d, exist_ok=True)
 
-            st.success("✅ Cache cleared successfully! System reset complete.")
+            st.success("Cache cleared successfully! System reset complete.")
             st.session_state.clear_cache_mode = False
             st.balloons()
             st.stop()
     
     with col_btn2:
-        if st.button("❌ Cancel", use_container_width=True, key="cancel_clear"):
+        if st.button("Cancel", use_container_width=True, key="cancel_clear"):
             st.session_state.clear_cache_mode = False
             st.rerun()
     
     st.stop()
 
-show_ocr_debug = st.checkbox("🔍 Show OCR Debug (technical details)", value=False)
+show_ocr_debug = st.checkbox("Show OCR Debug (technical details)", value=False)
 
-# Upload Section
+
 st.divider()
-st.subheader("📤 Step 1: Upload Required Documents")
+st.subheader("Step 1: Upload Required Documents")
 st.markdown("Please upload **all 4 documents** in the appropriate categories below. Accepted formats: PDF, PNG, JPG, JPEG, WebP")
 
 types = ["pdf", "png", "jpg", "jpeg", "webp"]
 
-# Create a better layout for file uploads
 col1, col2 = st.columns(2)
 
 with col1:
-    st.markdown("#### 📋 Identity Documents")
-    cni_file = st.file_uploader("📌 1. National ID (CNI/CNIE)", type=types, accept_multiple_files=False, key="cni")
+    st.markdown("#### Identity Documents")
+    cni_file = st.file_uploader("1. National ID (CNI/CNIE)", type=types, accept_multiple_files=False, key="cni")
     if cni_file:
-        st.caption(f"✅ {cni_file.name} ({cni_file.size} bytes)")
+        st.caption(f"{cni_file.name} ({cni_file.size} bytes)")
     
-    st.markdown("#### 💼 Insurance Documents")
-    life_file = st.file_uploader("📌 4. Life Savings Policy (épargne-vie)", type=types, accept_multiple_files=False, key="life")
+    st.markdown("#### Insurance Documents")
+    life_file = st.file_uploader("4. Life Savings Policy (épargne-vie)", type=types, accept_multiple_files=False, key="life")
     if life_file:
-        st.caption(f"✅ {life_file.name} ({life_file.size} bytes)")
+        st.caption(f"{life_file.name} ({life_file.size} bytes)")
 
 with col2:
-    st.markdown("#### 📄 Administrative Documents")
-    death_file = st.file_uploader("📌 3. Death Certificate", type=types, accept_multiple_files=False, key="death")
+    st.markdown("#### Administrative Documents")
+    death_file = st.file_uploader("3. Death Certificate", type=types, accept_multiple_files=False, key="death")
     if death_file:
-        st.caption(f"✅ {death_file.name} ({death_file.size} bytes)")
+        st.caption(f"{death_file.name} ({death_file.size} bytes)")
     
-    st.markdown("#### 🏦 Banking Documents")
-    rib_file = st.file_uploader("📌 2. Bank Account Details (RIB/IBAN)", type=types, accept_multiple_files=False, key="rib")
+    st.markdown("#### Banking Documents")
+    rib_file = st.file_uploader("2. Bank Account Details (RIB/IBAN)", type=types, accept_multiple_files=False, key="rib")
     if rib_file:
-        st.caption(f"✅ {rib_file.name} ({rib_file.size} bytes)")
+        st.caption(f"{rib_file.name} ({rib_file.size} bytes)")
 
 if not (cni_file and rib_file and death_file and life_file):
-    st.info("⏳ Waiting for all 4 documents to be uploaded...")
+    st.info("Waiting for all 4 documents to be uploaded...")
     st.stop()
 
 # Progress indicator
@@ -427,7 +423,7 @@ st.divider()
 
 col_center = st.columns([1, 2, 1])[1]
 with col_center:
-    if st.button("🚀 Start Analysis", use_container_width=True, key="start_analysis"):
+    if st.button("Start Analysis", use_container_width=True, key="start_analysis"):
         st.session_state.analysis_started = True
 
 if "analysis_started" not in st.session_state or not st.session_state.analysis_started:
@@ -449,8 +445,8 @@ case_id = hashlib.sha256(
 temp_dir = os.path.join(TMP_DIR, case_id)
 os.makedirs(temp_dir, exist_ok=True)
 
-# Processing section with progress
-st.subheader("⚙️ Step 2: Processing Documents")
+
+st.subheader("Step 2: Processing Documents")
 st.caption(f"Case ID: `{case_id}`")
 
 progress_bar = st.progress(0)
@@ -467,17 +463,17 @@ for expected_type, uf in inputs:
     with open(local_path, "wb") as f:
         f.write(file_bytes)
 
-    # duplicates: warn but still process (NO extra fake rows)
+    
     is_dup, prev_decision = fingerprints.is_duplicate(local_path)
     if is_dup:
-        st.warning(f"⚠️ {expected_type}: File already analyzed before (previous: {prev_decision}). Re-analyzing...")
+        st.warning(f"{expected_type}: File already analyzed before (previous: {prev_decision}). Re-analyzing...")
 
     try:
-        # Update progress for current document
+       
         idx = [x[0] for x in inputs].index(expected_type)
         progress = (idx) / len(inputs)
         progress_bar.progress(progress)
-        status_text.markdown(f"**Processing:** {expected_type} ({uf.name})... ⏳")
+        status_text.markdown(f"**Processing:** {expected_type} ({uf.name})...")
         
         ocr_text, structure, tech_report = validator.extract_all(local_path, file_bytes=file_bytes)
         result = validator.validate_with_groq(
@@ -531,35 +527,35 @@ for expected_type, uf in inputs:
             }
         })
 
-# Complete progress bar
+
 progress_bar.progress(1.0)
-status_text.success("✅ All documents processed successfully!")
+status_text.success("All documents processed successfully!")
 
 st.divider()
 
 case_decision, case_reason, case_issues = compute_case_decision(doc_results)
 
-# Get names/CNEs from our main variables
+
 id_data = next((d for d in doc_results if d["expected_type"] == "ID"), None)
 bank_data = next((d for d in doc_results if d["expected_type"] == "BANK"), None)
 death_data = next((d for d in doc_results if d["expected_type"] == "DEATH"), None)
 life_data = next((d for d in doc_results if d["expected_type"] == "LIFE_CONTRACT"), None)
 
-# 1. CNI vs BANK (Fuzzy name match)
+
 if id_data and bank_data:
     name_id = id_data["result"]["extracted_data"].get("cni_full_name")
     name_bank = bank_data["result"]["extracted_data"].get("bank_account_holder")
     if not fuzzy_name_match(name_id, name_bank):
         case_issues.append(f"CNI vs BANK: Nom CNI ({name_id}) ≠ Titulaire RIB ({name_bank})")
 
-# 2. DEATH vs LIFE_CONTRACT (Match Insured to Deceased)
+
 if death_data and life_data:
     cne_death = death_data["result"]["extracted_data"].get("deceased_cne")
     cne_insured = life_data["result"]["extracted_data"].get("insured_cne")
     if cne_death and cne_insured and cne_death != cne_insured:
         case_issues.append(f"Décès vs Assurance: CNE décédé ({cne_death}) ≠ CNE assuré ({cne_insured})")
 
-# 3. CNI vs LIFE_CONTRACT (Match Beneficiary to CNI)
+
 if id_data and life_data:
     cne_id = id_data["result"]["extracted_data"].get("cni_cne")
     cne_benef = life_data["result"]["extracted_data"].get("beneficiary_cne")
@@ -605,14 +601,14 @@ with open(os.path.join(case_dir, "report.json"), "w", encoding="utf-8") as fp:
 
 st.divider()
 
-# Results section with better styling
-st.subheader("📊 Step 3: Validation Results")
 
-# Decision display with color
-decision_color = "🟢" if case_decision == "ACCEPT" else "🟡"
-st.markdown(f"### {decision_color} **Decision: {case_decision}**")
+st.subheader("Step 3: Validation Results")
 
-# Create metrics for overview
+
+decision_color = "[PASS]" if case_decision == "ACCEPT" else "[WARN]"
+st.markdown(f"### Decision: {case_decision}")
+
+
 col1, col2, col3, col4 = st.columns(4)
 
 valid_docs = sum(1 for d in doc_results if d["result"].get("decision") == "ACCEPT")
@@ -631,7 +627,7 @@ with col4:
 st.markdown(f"**Analysis Summary:** {case_reason}")
 
 st.divider()
-st.subheader("📋 Document Summary Table")
+st.subheader("Document Summary Table")
 
 rows = []
 for d in doc_results:
@@ -639,13 +635,11 @@ for d in doc_results:
     ex = r.get("extracted_data", {}) or {}
     holder, rib, iban = safe_get_bank_fields(ex)
 
-    # ... inside your loop where you define 'ex' (extracted_data) ...
-
-    # 1. Initialize empty values for our target columns
+   
     cni_nom, cni_cne, cni_naiss, cni_exp = "—", "—", "—", "—"
     deces_nom, deces_cne, deces_date = "—", "—", "—"
 
-    # 2. Apply Conditional Mapping based on expected_type
+  
     if d["expected_type"] == "ID":
         cni_nom = ex.get("cni_full_name", "—")
         cni_cne = ex.get("cni_cne", "—")
@@ -659,17 +653,17 @@ for d in doc_results:
         cni_naiss = ex.get("deceased_birth_date", "—")
 
     elif d["expected_type"] == "LIFE_CONTRACT":
-        # As requested: BÉNÉFICIAIRE goes to CNI cells
+       
         cni_nom = ex.get("beneficiary_full_name", "—")
         cni_cne = ex.get("beneficiary_cne", "—")
         cni_naiss = ex.get("beneficiary_birth_date", "—")
 
-        # As requested: ASSURÉ goes to DÉCÈS cells
+        
         deces_nom = ex.get("insured_full_name", "—")
         deces_cne = ex.get("insured_cne", "—")
-        deces_date = ex.get("insured_birth_date", "—") # Using birth date since death date doesn't exist for insured here
+        deces_date = ex.get("insured_birth_date", "—") 
 
-    # 3. Now append the row using these variables
+  
     rows.append({
         "Doc attendu": d["expected_type"],
         "Fichier": d["file_name"],
@@ -703,23 +697,22 @@ for d in doc_results:
 st.dataframe(rows, use_container_width=True)
 
 st.divider()
-st.subheader("🔍 Cross-Document Consistency Check")
+st.subheader("Cross-Document Consistency Check")
 if case_issues:
     for i in case_issues:
-        st.warning(f"⚠️ {i}")
+        st.warning(f"{i}")
 else:
-    st.success("✅ All documents are consistent and coherent!")
+    st.success("All documents are consistent and coherent!")
 
 st.divider()
-st.subheader("📑 Detailed Document Analysis")
+st.subheader("Detailed Document Analysis")
 for d in doc_results:
     r = d["result"]
     ex = r.get("extracted_data", {}) or {}
     
-    # Color emoji based on decision
-    decision_emoji = "✅" if r.get('decision') == "ACCEPT" else "⚠️"
+    decision_status = "[PASS]" if r.get('decision') == "ACCEPT" else "[WARN]"
     
-    with st.expander(f"{decision_emoji} {d['expected_type']} — {d['file_name']} — Score: {r.get('score',0)}/100"):
+    with st.expander(f"{decision_status} {d['expected_type']} — {d['file_name']} — Score: {r.get('score',0)}/100"):
         st.write(f"**Analysis Result:** {to_safe_reason(r.get('reason',''))}")
         
         col1, col2, col3 = st.columns(3)
@@ -728,7 +721,7 @@ for d in doc_results:
         with col2:
             st.metric("Confidence", f"{r.get('score', 0)}%")
         with col3:
-            fraud_status = "🚨 YES" if r.get('fraud_suspected', False) else "✅ No"
+            fraud_status = "YES" if r.get('fraud_suspected', False) else "No"
             st.metric("Fraud Suspected", fraud_status)
         
         st.json(sanitize_dict({
@@ -748,4 +741,4 @@ except Exception:
 
 st.divider()
 st.markdown("---")
-st.markdown("<div align='center'><small>🏆 Smart Assurance Validator — Hackathon Project</small></div>", unsafe_allow_html=True)
+st.markdown("<div align='center'><small>Smart Assurance Validator — Hackathon Project</small></div>", unsafe_allow_html=True)
