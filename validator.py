@@ -315,14 +315,14 @@ CONTRAINTES:
    - bank_cle_rib (2 chiffres)
    Total RIB = 24 chiffres.
 4. Si données manquantes/illisibles => mettre "".
-5. Si texte introuvable => decision="REVIEW", reason="Champ manquant".
+5. Si texte introuvable => decision="REVIEW", 
 
 EXEMPLES:
 
 TYPE: ID
 {{
-  "decision": "ACCEPT",
-  "score": 95,
+  "decision": "REVIEW",
+  "score": 89,
   "country": "MAROC",
   "doc_type": "ID",
   "fraud_suspected": false,
@@ -339,7 +339,7 @@ TYPE: ID
     "iban_format_valid": true,
     "cne_format_valid": true
   }},
-  "reason": "CNI bien extraite, CNE valide, date expiration correcte."
+  "reason": "CNI bien extraite, CNE valide, date expiration incorrecte."
 }}
 
 TYPE: BANK
